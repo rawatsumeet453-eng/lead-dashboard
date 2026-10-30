@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lead Quality Dashboard — Meta Ads Real Estate</title>
+<style>
+:root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--line:#e3e2de;--text:#0b0b0b;--text2:#52514e;--muted:#7a7974;--head:#1f2a37;
+--accent:#2a78d6;--good:#0ca30c;--goodtxt:#006300;--warn:#fab219;--critical:#d03b3b;--badtxt:#b42318}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#1a1a19;--panel:#222221;--line:#3a3a37;--text:#f0efec;--text2:#c3c2b7;
+--muted:#9a998f;--head:#0f1620;--accent:#3987e5;--goodtxt:#5cc85c;--badtxt:#f08a8a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{background:var(--head);color:#fff;padding:18px 20px}header h1{margin:0;font-size:20px}header p{margin:4px 0 0;opacity:.85;font-size:13px}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.card h2{font-size:16px;margin:0 0 10px;display:flex;gap:8px;align-items:center}.step{background:var(--accent);color:#fff;border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:13px}
+label{font-size:13px;color:var(--text2);display:block;margin-bottom:4px}
+select,input[type=text],input[type=date]{font:inherit;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);width:100%}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.drop{border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:.15s}
+.drop.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.drop b{color:var(--accent)}.hint{font-size:12px;color:var(--muted)}
+.files{list-style:none;padding:0;margin:10px 0 0}.files li{display:flex;justify-content:space-between;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;margin-top:6px;font-size:13px}
+.files button{border:0;background:none;color:var(--badtxt);cursor:pointer;font-size:16px}
+.go{width:100%;padding:14px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:600 16px system-ui;cursor:pointer}
+.go:disabled{opacity:.5;cursor:wait}
+#status{margin-top:10px;font-size:13px;color:var(--text2);min-height:20px}#status.err{color:var(--badtxt);font-weight:600}
+.bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:6px;display:none}.bar span{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}.kpi .v{font-size:22px;font-weight:700}.kpi .l{font-size:12px;color:var(--text2)}
+.ok{color:var(--goodtxt)}.no{color:var(--badtxt)}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.btn{padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:inherit;cursor:pointer;text-decoration:none}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+iframe{width:100%;height:85vh;border:1px solid var(--line);border-radius:12px;background:#fff}
+.warns{font-size:13px;margin:6px 0;padding-left:18px}.warns li{margin:3px 0}
+details{font-size:14px}details summary{cursor:pointer;font-weight:600}details li{margin:4px 0}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
+@media (max-width:700px){.row{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}iframe{height:75vh}}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Lead Quality Dashboard — Meta Ads Real Estate</h1>
+  <p>Upload the CRM sheet + Meta export → accurate campaign dashboard. 🔒 Files never leave this device — everything is calculated in your browser.</p>
+</header>
+<main>
+  <section class="card">
+    <h2><span class="step">1</span> Project</h2>
+    <div class="row">
+      <div><label for="client">Select project</label><select id="client"></select></div>
+      <div id="otherWrap" style="display:none"><label for="otherName">Project name</label><input type="text" id="otherName" placeholder="e.g. Rutu Samruddhi"></div>
+    </div>
+    <p class="hint">Project select karne se uske special status words / rules apne aap lag jaate hain. Naya project ho to "Other project" chuno.</p>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">2</span> Files</h2>
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose files">
+      <div style="font-size:28px">⬆️</div>
+      <div><b>Tap to choose files</b> or drag &amp; drop here</div>
+      <div class="hint">CRM sheet (.xlsx) · Meta Ads export (.csv / .xlsx) · Meta lead download (optional)</div>
+      <input type="file" id="file" multiple accept=".xlsx,.xlsm,.csv,.tsv,.txt" style="display:none">
+    </div>
+    <ul class="files" id="files"></ul>
+    <details style="margin-top:12px"><summary>Kaunsi files chahiye? (export steps)</summary>
+      <ol>
+        <li><b>CRM sheet:</b> Google Sheet → File → Download → <b>Microsoft Excel (.xlsx)</b>. CSV mat lena — CSV me phone 9.20E+11 ban jaata hai.</li>
+        <li><b>Meta Ads export:</b> Ads Manager → Ads tab → date range → Breakdown → <b>By time: Day</b> + <b>By delivery: Placement</b> → Export (.csv).</li>
+        <li><b>Meta lead download (optional):</b> Leads Center / form → Download (.csv). Isse Facebook vs Instagram quality milti hai.</li>
+      </ol>
+      <p class="hint">Poori Google Sheet (CRM + Raw Data + Meta Leads tabs) ek hi .xlsx me bhi chalegi — har tab apne aap pehchana jaata hai.</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">3</span> Period <span class="hint" style="font-weight:400">(optional — blank = all data)</span></h2>
+    <div class="row">
+      <div><label for="from">From</label><input type="date" id="from"></div>
+      <div><label for="to">To</label><input type="date" id="to"></div>
+    </div>
+  </section>
+
+  <button class="go" id="go">Generate dashboard</button>
+  <div class="bar" id="bar"><span></span></div>
+  <div id="status"></div>
+
+  <section class="card" id="result" style="display:none;margin-top:14px">
+    <h2>✅ Result</h2>
+    <div class="kpis" id="kpis"></div>
+    <ul class="warns" id="warns"></ul>
+    <div class="btns">
+      <button class="btn primary" id="dl">⬇️ Download dashboard</button>
+      <button class="btn" id="full">⤢ Open full screen</button>
+    </div>
+    <iframe id="view" title="Dashboard"></iframe>
+  </section>
+</main>
+<footer>Engine <span id="ver"></span> · Same engine as the Agency Ops agent · Quality % = quality leads ÷ total leads · Visit ratio = (Visited + Booked) ÷ total leads</footer>
+
+<script src="pyodide/pyodide.js"></script>
+<script>
+const ENGINE_VERSION = "202610301204";
+const ENGINE_FILES = ["lead_quality.py", "purekit.py", "campaign_dashboard.py", "dashboard_html.py", "default_config.json", "clients.json"];
+const WHEELS = ["openpyxl-3.1.5-py2.py3-none-any.whl", "et_xmlfile-2.0.0-py3-none-any.whl"];
+const WEBAPP_PY = `
+import json, datetime as dt
+from pathlib import Path
+import campaign_dashboard as cd, dashboard_html as dh
+from lead_quality import deep_merge
+BASE = json.loads(Path('/engine/default_config.json').read_text(encoding='utf-8'))
+CLIENTS = json.loads(Path('/engine/clients.json').read_text(encoding='utf-8'))
+
+def generate(names_json, client_key, client_name, d_from, d_to):
+    try:
+        names = json.loads(names_json)
+        cfg = deep_merge(BASE, (CLIENTS.get(client_key) or {}).get('config', {}))
+        ups = [(n, Path('/uploads/' + n).read_bytes()) for n in names]
+        f = dt.date.fromisoformat(d_from) if d_from else None
+        t = dt.date.fromisoformat(d_to) if d_to else None
+        rep = cd.build_from_uploads(ups, cfg, client_name, f, t)
+        a, th = rep['account'], rep['rules']['thresholds']
+        summary = {'leads': a['leads'], 'quality': a['quality'], 'quality_pct': a['quality_pct'], 'strict_quality_pct': a['strict_quality_pct'],
+                   'visits': a['site_visits'], 'visit_ratio_pct': a['visit_ratio_pct'], 'cpl': a.get('cpl'), 'spend': a.get('spend'),
+                   'tq': th['scale_quality_pct'], 'tv': th['target_visit_ratio_pct'], 'period': rep['period'], 'files': rep['files'],
+                   'campaigns': len(rep['campaigns'])}
+        warns = [c['text'] for c in rep['checks'] if c['type'] == 'warn'][:6]
+        return json.dumps({'ok': True, 'html': dh.render(rep), 'summary': summary, 'warns': warns})
+    except Exception as e:
+        import traceback
+        return json.dumps({'ok': False, 'error': str(e), 'trace': traceback.format_exc()[-1500:]})
+`;
+const $ = id => document.getElementById(id);
+let py = null, booting = null, files = [], lastHtml = "", clients = {};
+
+function status(msg, pctDone, err) {
+  $("status").textContent = msg; $("status").className = err ? "err" : "";
+  const b = $("bar"); if (pctDone == null) { b.style.display = "none"; } else { b.style.display = "block"; b.firstElementChild.style.width = pctDone + "%"; }
+}
+async function fetchText(p) { const r = await fetch(p + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + p); return r.text(); }
+async function fetchBytes(p) { const r = await fetch(p + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + p); return new Uint8Array(await r.arrayBuffer()); }
+
+async function boot() {
+  if (booting) return booting;
+  booting = (async () => {
+    status("Loading engine… (first time 10-30 sec, then it is cached)", 10);
+    py = await loadPyodide({ indexURL: "pyodide/" });
+    status("Loading rules…", 60);
+    py.FS.mkdirTree("/engine"); py.FS.mkdirTree("/wheels"); py.FS.mkdirTree("/uploads");
+    for (const f of ENGINE_FILES) py.FS.writeFile("/engine/" + f, await fetchText("engine/" + f));
+    for (const w of WHEELS) py.FS.writeFile("/wheels/" + w, await fetchBytes("wheels/" + w));
+    py.runPython(`import sys\nsys.path[:0] = ['/engine'] + ['/wheels/' + w for w in ${JSON.stringify(WHEELS)}]`);
+    py.runPython(WEBAPP_PY);
+    status("Engine ready.", 100); setTimeout(() => status(""), 800);
+  })();
+  return booting;
+}
+
+function renderFiles() {
+  $("files").innerHTML = files.map((f, i) => `<li><span>📄 ${f.name.replace(/</g, "&lt;")} <span class="hint">${(f.size / 1024).toFixed(0)} KB</span></span><button aria-label="remove" data-i="${i}">✕</button></li>`).join("");
+  $("files").querySelectorAll("button").forEach(b => b.onclick = () => { files.splice(+b.dataset.i, 1); renderFiles(); });
+}
+function addFiles(list) { for (const f of list) if (!files.some(x => x.name === f.name && x.size === f.size)) files.push(f); renderFiles(); }
+
+async function loadClients() {
+  try { clients = JSON.parse(await fetchText("engine/clients.json")); } catch (e) { clients = {}; }
+  const sel = $("client");
+  sel.innerHTML = Object.entries(clients).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join("") + `<option value="__other">Other project</option>`;
+  sel.onchange = () => { $("otherWrap").style.display = sel.value === "__other" ? "block" : "none"; };
+  sel.onchange();
+}
+const inr = x => x == null ? "—" : "₹" + Math.round(x).toLocaleString("en-IN");
+
+async function generate() {
+  if (!files.length) { status("Pehle files choose karo (kam se kam CRM sheet).", null, true); return; }
+  $("go").disabled = true; $("result").style.display = "none";
+  try {
+    await boot();
+    status("Reading files…", 70);
+    const names = [];
+    for (const f of files) {
+      const safe = f.name.replace(/[\\/]/g, "_");
+      py.FS.writeFile("/uploads/" + safe, new Uint8Array(await f.arrayBuffer())); names.push(safe);
+    }
+    status("Reading every status, follow-up and feedback… building dashboard", 85);
+    await new Promise(r => setTimeout(r, 30));
+    const key = $("client").value;
+    const name = key === "__other" ? ($("otherName").value.trim() || "Project") : clients[key].name;
+    const gen = py.globals.get("generate");
+    const res = JSON.parse(gen(JSON.stringify(names), key, name, $("from").value || "", $("to").value || ""));
+    gen.destroy && gen.destroy();
+    for (const n of names) { try { py.FS.unlink("/uploads/" + n); } catch (e) {} }
+    if (!res.ok) { status("❌ " + res.error, null, true); console.error(res.trace); return; }
+    lastHtml = res.html;
+    const s = res.summary, ok = (v, t) => v >= t ? "ok" : "no";
+    $("kpis").innerHTML = [
+      ["Leads", s.leads, ""], ["Quality %", s.quality_pct + "%", ok(s.quality_pct, s.tq)], ["Strict quality", s.strict_quality_pct + "%", ok(s.strict_quality_pct, s.tq)],
+      ["Visit ratio", s.visit_ratio_pct + "%", ok(s.visit_ratio_pct, s.tv)], ["CPL", inr(s.cpl), ""]
+    ].map(([l, v, c]) => `<div class="kpi"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join("");
+    $("warns").innerHTML = res.warns.map(w => `<li>⚠️ ${w.replace(/^⚠️\s*/, "").replace(/</g, "&lt;")}</li>`).join("");
+    $("view").srcdoc = lastHtml;
+    $("result").style.display = "block";
+    status(`Done — ${s.leads} leads, ${s.campaigns} campaigns (${s.period.from} – ${s.period.to}).`);
+    $("result").scrollIntoView({ behavior: "smooth" });
+  } catch (e) {
+    status("❌ " + (e.message || e), null, true); console.error(e);
+  } finally { $("go").disabled = false; }
+}
+function download() {
+  const blob = new Blob([lastHtml], { type: "text/html" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  const key = $("client").value, name = key === "__other" ? ($("otherName").value.trim() || "Project") : clients[key].name;
+  a.download = `${name.replace(/[^A-Za-z0-9]+/g, "_")}_Dashboard_${new Date().toISOString().slice(0, 10)}.html`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function fullscreen() { const w = window.open(URL.createObjectURL(new Blob([lastHtml], { type: "text/html" })), "_blank"); if (!w) download(); }
+
+$("ver").textContent = ENGINE_VERSION;
+$("drop").onclick = () => $("file").click();
+$("drop").onkeydown = e => { if (e.key === "Enter" || e.key === " ") $("file").click(); };
+$("file").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
+["dragover", "dragenter"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", e => addFiles(e.dataTransfer.files));
+$("go").onclick = generate; $("dl").onclick = download; $("full").onclick = fullscreen;
+loadClients();
+boot().catch(e => status("❌ Engine could not load: " + (e.message || e), null, true));   // warm up while the user picks files
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+{
+  "_note": "Global defaults. Client override: clients/<client>/config.json me sirf wo keys likho jo badalni hain.",
+  "thresholds": {
+    "low_data_leads": 15,
+    "scale_quality_pct": 30,
+    "optimize_quality_pct": 25,
+    "review_quality_pct": 20,
+    "target_visit_ratio_pct": 4
+  },
+  "dedupe_by_phone": true,
+  "extra_words": {
+    "booked": [],
+    "visited": [],
+    "will_visit": [],
+    "details_callback": [],
+    "interested": [],
+    "dead": [],
+    "followup": []
+  },
+  "campaign_aliases": {
+    "_example_crm_name": "Exact Ads Manager campaign name"
+  },
+  "compare_days": 7,
+  "target_cpl": null,
+  "fresh_lead_days": 2,
+  "journey_benchmarks": {
+    "_note": "Expected step conversion % (Mumbai RE). Break point = step furthest below its benchmark.",
+    "called": 95,
+    "connected": 65,
+    "quality": 45,
+    "will_visit": 30,
+    "visited": 50,
+    "booked": 10
+  },
+  "fatigue": {
+    "window_days": 7,
+    "min_spend": 2000,
+    "min_impr": 3000,
+    "ctr_warn": 20,
+    "cpl_warn": 25,
+    "cpm_warn": 20,
+    "reach_warn": 20,
+    "w_ctr": 30,
+    "w_cpl": 35,
+    "w_reach": 20,
+    "w_cpm": 15,
+    "fatigue_score": 55,
+    "watch_score": 30
+  },
+  "ad_angles": {
+    "_example_ad_name": "Price / Offer"
+  },
+  "show_lead_names": true
+}
