@@ -329,7 +329,7 @@ def render(r: dict) -> str:
                 num(p["clicks"]), pc(p["ctr_pct"]), fmt_inr(p["cpm"]), pc(p.get("click_to_lead_pct")), num(p["meta_leads"]), fmt_inr(p["meta_cpl"]),
                 num(p.get("est_leads"), 1), num(p.get("est_quality"), 1), pc(p.get("est_quality_pct")), fmt_inr(p.get("est_cost_per_quality")),
                 dpill(p.get("decision", "")) + f'<div class="tiny">{E(p.get("decision_why", ""))}</div>'] for p in r["placements"]]
-    pf_rows = [[f'<b>{E(p["platform"])}</b>', num(p["leads"]), num(p["quality"]), pc(p["quality_pct"]), bar(p["quality_pct"]), num(p["site_visits"]),
+    pf_rows = [[f'<b>{E(p["platform"] or "Unknown — add the Meta lead download")}</b>', num(p["leads"]), num(p["quality"]), pc(p["quality_pct"]), bar(p["quality_pct"]), num(p["site_visits"]),
                 num(p["doubtful"]), fmt_inr(p["spend"]), fmt_inr(p["cost_per_quality"])] for p in r["platforms"]]
     acpq = acc.get("cost_per_quality")
     placement_html = f"""
@@ -359,9 +359,9 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
     visits_html = f"""
 <section class="band"><h2>🏠 Site visits & bookings</h2><div class="kpis">{vk}</div></section>
 <section><h2>By campaign</h2>{table(["Campaign", "Leads", "Will visit", "Visited (+booked)", "Visit %", "Cost / visit", "Bookings", "Cost / booking"], v_rows)}</section>
-<section><h2>📌 Will Visit — confirm these slots ({len(lists['will_visit'])})</h2>{lead_table(lists['will_visit'])}</section>
-<section><h2>🔥 Push for a visit — Details / Call back / Interested ({len(lists['push_for_visit'])})</h2>{lead_table(lists['push_for_visit'])}</section>
-<section><h2>✅ Visited / Booked ({len(lists['visited_booked'])})</h2>{lead_table(lists['visited_booked'])}</section>"""
+<section class="leadlist"><h2>📌 Will Visit — confirm these slots ({len(lists['will_visit'])})</h2>{lead_table(lists['will_visit'])}</section>
+<section class="leadlist"><h2>🔥 Push for a visit — Details / Call back / Interested ({len(lists['push_for_visit'])})</h2>{lead_table(lists['push_for_visit'])}</section>
+<section class="leadlist"><h2>✅ Visited / Booked ({len(lists['visited_booked'])})</h2>{lead_table(lists['visited_booked'])}</section>"""
 
     # ---------------- LEAD LIST
     buckets = sorted({x["bucket"] for x in lists["all"]})
@@ -432,7 +432,7 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
             ("placement", "Platform & Placement", placement_html), ("visits", "Visits & Bookings", visits_html),
             ("leads", "Lead List", leadlist_html), ("checks", "Data Checks", checks_html)]
     nav = "".join(f'<button class="tab{" on" if i == 0 else ""}" data-t="{k}" onclick="sh(\'{k}\')">{E(t)}</button>' for i, (k, t, _) in enumerate(tabs))
-    panes = "".join(f'<div class="pane{" on" if i == 0 else ""}" id="p-{k}">{body}</div>' for i, (k, _, body) in enumerate(tabs))
+    panes = "".join(f'<div class="pane{" on" if i == 0 else ""}" id="p-{k}"><h1 class="ptitle">{E(t)}</h1>{body}</div>' for i, (k, t, body) in enumerate(tabs))
     title = f'{r["client"].replace("-", " ").title()} — Meta Lead Ads Dashboard'
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{E(title)}</title><style>{CSS}</style></head><body class="viz-root">
@@ -496,6 +496,25 @@ ul{margin:4px 0;padding-left:20px}li{margin:3px 0}
 .filters{display:flex;gap:16px;align-items:center;margin-bottom:8px;flex-wrap:wrap}select{font:inherit;padding:3px 6px}
 .checks{list-style:none;padding:0}.checks li{padding:6px 8px;border-bottom:1px solid var(--line)}.checks li.warn{background:color-mix(in srgb,var(--warn) 10%,transparent)}
 .expert{border-left:4px solid var(--series)}
+.ptitle{display:none}
+@media print{
+  @page{size:A4 landscape;margin:10mm}
+  .viz-root{color-scheme:light;--surface:#fff;--panel:#fff;--band:#f3f6fb;--line:#d9d8d3;--text:#0b0b0b;--text2:#52514e;--muted:#6b6a65;--head:#1f2a37}
+  body{font-size:11px;background:#fff}
+  header{position:static;padding:10px 14px}nav{display:none}
+  main{max-width:none;padding:0}
+  .pane{display:block!important;page-break-before:always}.pane:first-child{page-break-before:auto}
+  .ptitle{display:block;font-size:18px;margin:4px 0 10px;border-bottom:2px solid var(--head);padding-bottom:4px}
+  section{break-inside:avoid-page;page-break-inside:avoid;margin-bottom:10px}
+  section.camp{break-inside:auto;page-break-inside:auto}
+  table{font-size:10px}th,td{padding:4px 6px}
+  .tw{overflow:visible}.kv{font-size:18px}
+  .filters{display:none}
+  #p-leads,.leadlist{display:none!important}
+  .pdf-full #p-leads{display:block!important}.pdf-full .leadlist{display:block!important}
+  .pdf-full #p-leads tbody tr{display:table-row!important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
 .frl{display:grid;grid-template-columns:150px 1fr;gap:8px;margin:-2px 0 2px}.lostrow{display:flex;flex-wrap:wrap;gap:4px}
 .lost{font-size:11px;color:var(--badtxt);background:color-mix(in srgb,var(--critical) 8%,transparent);border-radius:4px;padding:1px 6px}
 .targets .tg{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}

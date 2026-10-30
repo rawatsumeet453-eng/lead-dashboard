@@ -90,6 +90,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
     <ul class="warns" id="warns"></ul>
     <div class="btns">
       <button class="btn primary" id="dl">⬇️ Download dashboard</button>
+      <button class="btn" id="pdf">🖨 Download PDF</button>
       <button class="btn" id="full">⤢ Open full screen</button>
     </div>
     <iframe id="view" title="Dashboard"></iframe>
@@ -97,9 +98,8 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
 </main>
 <footer>Engine <span id="ver"></span> · Same engine as the Agency Ops agent · Quality % = quality leads ÷ total leads · Visit ratio = (Visited + Booked) ÷ total leads</footer>
 
-<script src="pyodide/pyodide.js"></script>
 <script>
-const ENGINE_VERSION = "202610301204";
+const ENGINE_VERSION = "202610301309";
 const ENGINE_FILES = ["lead_quality.py", "purekit.py", "campaign_dashboard.py", "dashboard_html.py", "default_config.json", "clients.json"];
 const WHEELS = ["openpyxl-3.1.5-py2.py3-none-any.whl", "et_xmlfile-2.0.0-py3-none-any.whl"];
 const WEBAPP_PY = `
@@ -136,18 +136,31 @@ function status(msg, pctDone, err) {
   $("status").textContent = msg; $("status").className = err ? "err" : "";
   const b = $("bar"); if (pctDone == null) { b.style.display = "none"; } else { b.style.display = "block"; b.firstElementChild.style.width = pctDone + "%"; }
 }
-async function fetchText(p) { const r = await fetch(p + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + p); return r.text(); }
-async function fetchBytes(p) { const r = await fetch(p + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + p); return new Uint8Array(await r.arrayBuffer()); }
+// Works whether the files were uploaded inside folders (engine/, pyodide/, wheels/) or all in one place.
+const DIRS = { engine: ["engine/", "./"], pyodide: ["pyodide/", "./"], wheels: ["wheels/", "./"] };
+const found = {};
+async function locate(kind, probe) {
+  if (found[kind] != null) return found[kind];
+  for (const d of DIRS[kind]) {
+    try { const r = await fetch(d + probe + "?v=" + ENGINE_VERSION, { method: "HEAD", cache: "no-store" }); if (r.ok) return (found[kind] = d); } catch (e) {}
+  }
+  throw new Error(`File missing on the website: ${probe}. Upload all files again (see README).`);
+}
+async function fetchText(kind, f) { const d = await locate(kind, f); const r = await fetch(d + f + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + f); return r.text(); }
+async function fetchBytes(kind, f) { const d = await locate(kind, f); const r = await fetch(d + f + "?v=" + ENGINE_VERSION); if (!r.ok) throw new Error("Missing " + f); return new Uint8Array(await r.arrayBuffer()); }
+function loadScript(src) { return new Promise((ok, bad) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => bad(new Error("Could not load " + src)); document.head.appendChild(s); }); }
 
 async function boot() {
   if (booting) return booting;
   booting = (async () => {
     status("Loading engine… (first time 10-30 sec, then it is cached)", 10);
-    py = await loadPyodide({ indexURL: "pyodide/" });
+    const pdir = await locate("pyodide", "pyodide.js");
+    if (typeof loadPyodide === "undefined") await loadScript(pdir + "pyodide.js");
+    py = await loadPyodide({ indexURL: new URL(pdir, location.href).href });
     status("Loading rules…", 60);
     py.FS.mkdirTree("/engine"); py.FS.mkdirTree("/wheels"); py.FS.mkdirTree("/uploads");
-    for (const f of ENGINE_FILES) py.FS.writeFile("/engine/" + f, await fetchText("engine/" + f));
-    for (const w of WHEELS) py.FS.writeFile("/wheels/" + w, await fetchBytes("wheels/" + w));
+    for (const f of ENGINE_FILES) py.FS.writeFile("/engine/" + f, await fetchText("engine", f));
+    for (const w of WHEELS) py.FS.writeFile("/wheels/" + w, await fetchBytes("wheels", w));
     py.runPython(`import sys\nsys.path[:0] = ['/engine'] + ['/wheels/' + w for w in ${JSON.stringify(WHEELS)}]`);
     py.runPython(WEBAPP_PY);
     status("Engine ready.", 100); setTimeout(() => status(""), 800);
@@ -162,7 +175,7 @@ function renderFiles() {
 function addFiles(list) { for (const f of list) if (!files.some(x => x.name === f.name && x.size === f.size)) files.push(f); renderFiles(); }
 
 async function loadClients() {
-  try { clients = JSON.parse(await fetchText("engine/clients.json")); } catch (e) { clients = {}; }
+  try { clients = JSON.parse(await fetchText("engine", "clients.json")); } catch (e) { clients = {}; }
   const sel = $("client");
   sel.innerHTML = Object.entries(clients).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join("") + `<option value="__other">Other project</option>`;
   sel.onchange = () => { $("otherWrap").style.display = sel.value === "__other" ? "block" : "none"; };
@@ -212,6 +225,12 @@ function download() {
   a.download = `${name.replace(/[^A-Za-z0-9]+/g, "_")}_Dashboard_${new Date().toISOString().slice(0, 10)}.html`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+function pdf() {
+  // opens the dashboard and the browser's print dialog -> choose "Save as PDF" (all tabs, A4 landscape)
+  const w = window.open(URL.createObjectURL(new Blob([lastHtml], { type: "text/html" })), "_blank");
+  if (!w) { status("Pop-up blocked — allow pop-ups for this site, or use Download dashboard.", null, true); return; }
+  w.addEventListener("load", () => setTimeout(() => w.print(), 400));
+}
 function fullscreen() { const w = window.open(URL.createObjectURL(new Blob([lastHtml], { type: "text/html" })), "_blank"); if (!w) download(); }
 
 $("ver").textContent = ENGINE_VERSION;
@@ -221,7 +240,7 @@ $("file").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
 ["dragover", "dragenter"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
 ["dragleave", "drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
 $("drop").addEventListener("drop", e => addFiles(e.dataTransfer.files));
-$("go").onclick = generate; $("dl").onclick = download; $("full").onclick = fullscreen;
+$("go").onclick = generate; $("dl").onclick = download; $("full").onclick = fullscreen; $("pdf").onclick = pdf;
 loadClients();
 boot().catch(e => status("❌ Engine could not load: " + (e.message || e), null, true));   // warm up while the user picks files
 </script>
