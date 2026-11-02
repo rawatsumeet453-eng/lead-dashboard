@@ -36,6 +36,7 @@ from lead_quality import (  # noqa: E402
     clean_phone, find_cols, fmt_inr, is_sci_phone, is_test_lead, load_config, money, norm, pct, verdict,
 )
 from purekit import day, parse_dates, read_tables, to_num  # noqa: E402
+from optimizer import optimise  # noqa: E402
 
 H_AD = [r"^ad\s+name$", r"^ad$", r"^ad\s+creative$", r"^creative$"]
 H_NAME = [r"^full\s+name$", r"^name$", r"^lead\s+name$", r"^customer\s+name$", r"^name"]
@@ -170,6 +171,7 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
         flag_cols = {stage: find_cols(cols, pats) for stage, pats in CAPI_FLAGS.items()}
         c_plat = find_cols(cols, H_PLATFORM)
         n_test = n_blank = n_sci = n_utc = n_dup = n_wa = n_capi_bad = n_capi_nobasis = 0
+        n_src = {"final": 0, "status": 0}
         for r, d, rawd in zip(t.rows, dates, dvals):
             get = lambda c: _txt(r.get(c)) if c else ""  # noqa: E731
             name_, email, phone = get(C["name"]), get(C["email"]), get(C["phone"])
@@ -203,6 +205,8 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
             if res["bucket"] == "Duplicate":
                 n_dup += 1
                 continue
+            if res.get("source") in n_src:
+                n_src[res["source"]] += 1
             if is_sci_phone(phone):
                 n_sci += 1
             if isinstance(rawd, str) and re.search(r"(\+0000|Z)$", rawd.strip()):
@@ -240,6 +244,13 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
         if C["coarse"] and C["current"] not in C["coarse"]:
             checks.append(("fixed", f"Tab '{tab}': '{str(C['coarse'][0]).strip()}' only holds a bucket (Active / In Active / Not Interested) — "
                                     f"the detailed status column '{str(C['current']).strip()}' is used as the latest status."))
+        src_mode = getattr(clf, "source", "auto")
+        if src_mode == "auto" and C["final"] and n_src["final"]:
+            checks.append(("info", f"Tab '{tab}': CAPI sheet — {n_src['final']} leads judged from '{str(C['final']).strip()}' (Final Status), "
+                                   f"{n_src['status']} without a Final Status judged from Current Status + Follow-ups."))
+        elif src_mode != "all":
+            checks.append(("info", f"Tab '{tab}': no CAPI Final Status — quality judged from Current Status + Follow-ups "
+                                   "(Feedback is only used to flag doubtful leads)."))
         if C["notes"]:
             checks.append(("fixed", f"Tab '{tab}': {len(C['notes'])} column(s) without a header contain notes — read as feedback."))
         if n_test:
@@ -711,18 +722,23 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     # ---------------- period compare (last N vs previous N)
     N = int(cfg.get("compare_days", 7))
     end = today + dt.timedelta(days=1)
-    windows = {"last": (end - dt.timedelta(days=N), end), "prev": (end - dt.timedelta(days=2 * N), end - dt.timedelta(days=N))}
-    compare = {}
-    for wname, (a, b) in windows.items():
-        sub = [r for r in crm if r["date"] is not None and a <= r["date"] < b]
-        wads = [r for r in ads if r["day"] is not None and a <= r["day"] < b]
-        sp = float(sum(r["spend"] for r in wads)) if (ads and has_days) else None
-        ms = money_stats(lead_stats(sub), sp or 0.0)
-        ms["spend"] = sp
-        ms["meta"] = meta_stats(wads) if (ads and has_days) else meta_stats(None)
-        ms["from"], ms["to"] = a.strftime("%d %b"), (b - dt.timedelta(days=1)).strftime("%d %b")
-        ms["pending_calls"] = sum((not r["called"]) + (r["bucket"] == "Follow-up") for r in sub)
-        compare[wname] = ms
+
+    def window_compare(n):
+        out = {}
+        for wname, (a, b) in {"last": (end - dt.timedelta(days=n), end), "prev": (end - dt.timedelta(days=2 * n), end - dt.timedelta(days=n))}.items():
+            sub = [r for r in crm if r["date"] is not None and a <= r["date"] < b]
+            wads = [r for r in ads if r["day"] is not None and a <= r["day"] < b]
+            sp = float(sum(r["spend"] for r in wads)) if (ads and has_days) else None
+            ms = money_stats(lead_stats(sub), sp or 0.0)
+            ms["spend"] = sp
+            ms["meta"] = meta_stats(wads) if (ads and has_days) else meta_stats(None)
+            ms["from"], ms["to"] = a.strftime("%d %b"), (b - dt.timedelta(days=1)).strftime("%d %b")
+            ms["pending_calls"] = sum((not r["called"]) + (r["bucket"] == "Follow-up") for r in sub)
+            ms["partial"] = a < start          # window starts before the data does -> don't compare
+            out[wname] = ms
+        return out
+    compare = window_compare(N)
+    compares = {str(n): (compare if n == N else window_compare(n)) for n in sorted({7, 14, 30, N})}
 
     # ---------------- trend
     daily = []
@@ -896,18 +912,23 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     actions = build_actions(acct, campaigns, ads_out, placements, crm, checks, cfg, today)
     growth = growth_plan(acct, campaigns, ads_out, placements, angles, cfg)
 
-    return {
+    report = {
         "client": client, "generated_at": dt.datetime.now().strftime("%d %b %Y, %H:%M"),
         "period": {"from": start.strftime("%d %b %Y"), "to": today.strftime("%d %b %Y")},
         "files": {k: sorted({n for n, _ in v}) for k, v in src.items()},
         "rules": {"quality_pct": "Quality leads ÷ total leads", "visit_ratio": "(Visited + Booked) ÷ total leads",
                   "quality_stages": [STAGE_LABEL[s] for s in reversed(STAGE_ORDER)], "thresholds": th, "compare_days": N},
-        "account": acct, "compare": compare, "daily": daily, "campaigns": campaigns, "ads": ads_out, "angles": angles,
+        "account": acct, "compare": compare, "compares": compares, "daily": daily, "campaigns": campaigns, "ads": ads_out, "angles": angles,
         "formats": formats, "placements": placements, "placement_groups": placement_groups, "platforms": platforms,
         "actions": actions, "growth": growth, "lists": lists,
         "checks": [{"type": t, "text": x} for t, x in checks],
         "insights": insights,
     }
+    try:
+        report["optimisation"] = optimise(report)
+    except Exception as e:  # never break the dashboard because of the optimiser
+        report["optimisation"] = {"error": f"{type(e).__name__}: {e}"}
+    return report
 
 
 # --------------------------------------------------------------------------------------

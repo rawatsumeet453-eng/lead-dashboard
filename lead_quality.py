@@ -355,6 +355,11 @@ class Classifier:
         self.followup = [re.compile(p) for p in FOLLOWUP_PATTERNS + wrap(extra.get("followup", []))]
         self.negative = [re.compile(p) for p in NEGATIVE_PHRASES]
         self.rewrites = [(re.compile(a), b) for a, b in QUALITY_REWRITES]
+        # Where a lead's quality is read from:
+        #   "auto"   (default) - Final Status (written by the CAPI script) when filled, else Current Status + Follow-ups
+        #   "status" - Current Status + Follow-ups only (ignore Final Status)
+        #   "all"    - old rule: Final + Current + Follow-ups + Feedback
+        self.source = cfg.get("quality_source", "auto")
 
     def best_quality(self, text: str):
         cleaned = text
@@ -448,12 +453,29 @@ class Classifier:
         latest = final_n or current_n or next((x for x in reversed(fu_n) if x), "")
         if latest and DUPLICATE_RX.search(latest) or (not latest and fb_n and DUPLICATE_RX.search(fb_n)):
             return {"bucket": "Duplicate", "label": "Duplicate (marked by sales)", "rank": 0, "key": "duplicate"}
-        everything = " | ".join([final_n, current_n, *fu_n, fb_n])
+        # 0) CAPI sheets: Final Status already applies "once quality, always quality" -> trust it
+        if self.source == "auto" and final_n:
+            q = self.best_quality(final_n)
+            if q:
+                return {"bucket": "Quality", "label": q[1], "rank": q[2], "key": q[0], "source": "final"}
+            r = self.dead_reason(final_n)
+            if r:
+                return {"bucket": "Dead", "label": r, "rank": 0, "key": "dead", "source": "final"}
+            if self.is_followup(final_n):
+                return {"bucket": "Follow-up", "label": "Follow-up", "rank": 0, "key": "followup", "source": "final"}
+            # Final Status not understood -> fall back to Current Status + Follow-ups below
+        if self.source == "all":
+            everything = " | ".join([final_n, current_n, *fu_n, fb_n])
+        elif self.source == "status":
+            everything = " | ".join([current_n, *fu_n])
+        else:
+            everything = " | ".join([final_n, current_n, *fu_n])
 
-        # 1) Quality anywhere -> Quality forever (best signal wins)
+        # 1) Quality anywhere in status / follow-ups -> Quality forever (best signal wins)
         q = self.best_quality(everything)
         if q:
-            return {"bucket": "Quality", "label": q[1], "rank": q[2], "key": q[0]}
+            return {"bucket": "Quality", "label": q[1], "rank": q[2], "key": q[0], "source": "status"}
+        everything = " | ".join([final_n, current_n, *fu_n, fb_n])
 
         # 2) Latest status: Final Status > Current Status > last non-empty follow-up
         if latest:

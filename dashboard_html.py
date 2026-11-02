@@ -16,6 +16,10 @@ OWNER_STYLE = {"Sales": "serious", "Campaign": "critical", "Healthy": "good"}
 DECISION_STYLE = {"KEEP — BEST": ("good", "▲"), "KEEP": ("good", "✓"), "WATCH": ("warn", "◆"), "REMOVE": ("critical", "■"),
                   "LOW DATA": ("muted", "○"), "IGNORE": ("muted", "–")}
 PRIORITY_STYLE = {"P1": ("critical", "■"), "P2": ("warn", "◆"), "P3": ("muted", "○")}
+OPT_STYLE = {"SCALE": ("good", "▲"), "MAKE MORE": ("good", "▲"), "FIX SALES": ("serious", "☎"), "CLEAN FUNNEL": ("warn", "◆"),
+             "OPTIMISE": ("warn", "◆"), "FIX ADS + FORM": ("critical", "■"), "FIX TRACKING FIRST": ("critical", "■"), "PAUSE": ("critical", "■"),
+             "REFRESH": ("serious", "↻"), "EXCLUDE (test)": ("critical", "▼"), "RE-CHECK": ("warn", "◆"), "LEARNING — HOLD": ("muted", "⏳"),
+             "LOW DATA": ("muted", "○"), "PASS": ("good", "✓"), "FAIL": ("critical", "✗"), "N/A": ("muted", "–")}
 FATIGUE_STYLE = {"Fatigued — refresh": ("critical", "■"), "Watch": ("warn", "◆"), "Healthy": ("good", "▲"), "Not delivering": ("muted", "–")}
 
 
@@ -46,6 +50,51 @@ def owner_pill(o):
     if o.startswith("Both"):
         k = "serious"
     return pill(("Problem: " + o) if o != "Healthy" else "No major problem", k, "⚑" if o != "Healthy" else "✓")
+
+
+def opt_pill(v):
+    k, i = OPT_STYLE.get(v, ("muted", "○"))
+    return pill(v, k, i)
+
+
+def optimisation_html(r):
+    o = r.get("optimisation")
+    if not o:
+        try:
+            from optimizer import optimise
+            o = optimise(r)
+        except Exception as e:  # noqa: BLE001
+            o = {"error": f"{type(e).__name__}: {e}"}
+    if o.get("error"):
+        return f'<section><p class="muted">Optimisation could not run: {E(o["error"])}</p></section>'
+    pr = lambda x: pill(x, *PRIORITY_STYLE.get(x, ("muted", "○")))  # noqa: E731
+    gate_rows = [[f'<b>{E(g["rule"])}</b>', E(g["name"]), opt_pill(g["status"]), E(g["detail"])] for g in o["gates"]]
+    act_rows = [[str(i), pr(a["priority"]), f'<b>{E(a["owner"])}</b>', f'<b>{E(a["action"])}</b>', E(a["why"]), E(a["rule"])]
+                for i, a in enumerate(o["actions"], 1)]
+    camp_rows = [[f'<b>{E(c["campaign"])}</b>' + ('<div class="tiny">merge (R15)</div>' if c.get("consolidate") else ""),
+                  num(c["leads"]), num(c["leads_14d"]), pc(c["strict_quality_pct"]), pc(c["visit_ratio_pct"]), fmt_inr(c["cost_per_quality"]),
+                  opt_pill(c["verdict"]) + f'<div class="tiny">{E(c["rule"])}</div>', f'<b>{E(c["owner"])}</b>', E(c["action"]) + f'<div class="tiny">{E(c["why"])}</div>']
+                 for c in o["campaigns"]]
+    ad_rows = [[f'<b>{E(a["ad"])}</b><div class="tiny">{E(a["campaign"])}</div>', E(a["angle"]), num(a["leads"]), fmt_inr(a["spend"]),
+                pc(a["strict_quality_pct"]), opt_pill(a["verdict"]) + f'<div class="tiny">{E(a["rule"])}</div>', E(a["action"]) + f'<div class="tiny">{E(a["why"])}</div>']
+               for a in o["ads"]]
+    pl_rows = [[f'<b>{E(p["placement"])}</b>', pc(p["share_spend_pct"]), fmt_inr(p["est_cost_per_quality"]), opt_pill(p["verdict"]), E(p["why"])] for p in o["placements"]]
+    rule_rows = [[f'<b>{E(x["rule"])}</b>', E(x["when"]), opt_pill(x["verdict"])] for x in o["rules"]]
+    owners = {}
+    for a in o["actions"]:
+        owners[a["owner"]] = owners.get(a["owner"], 0) + 1
+    return f"""
+<section class="band"><h2>🤖 Optimisation verdict — {opt_pill(o['verdict'])}</h2><p>{E(o['verdict_why'])}</p>
+<p class="tiny">17 rules, all on <b>strict quality</b> (status quality minus leads whose feedback says otherwise). {E(o.get('days') or '—')} days of data.</p>
+<div class="kpis">{''.join(card(k, str(n), "actions") for k, n in owners.items())}</div></section>
+<section><h2>✅ This week — do these, in this order</h2>
+{table(["#", "Priority", "Owner", "Action", "Why (from the data)", "Rule"], act_rows) if act_rows else '<p class="muted">No action triggered — keep running.</p>'}</section>
+<section><h2>🚦 Health checks (account)</h2>{table(["Rule", "Check", "Status", "Detail"], gate_rows)}</section>
+<section><h2>📣 Campaign verdicts</h2>{table(["Campaign", "Leads", "Leads (14d)", "Strict Q %", "Visit %", "Cost / quality", "Verdict", "Owner", "Do this"], camp_rows)}</section>
+<section><h2>🎬 Ads to pause / refresh / copy</h2>{table(["Ad", "Angle", "Leads", "Spend", "Strict Q %", "Verdict", "Do this"], ad_rows) if ad_rows else '<p class="muted">No ad needs action yet (or no spend data).</p>'}</section>
+<section><h2>📍 Placements</h2>{table(["Placement", "Spend share", "Est. cost / quality", "Verdict", "Why"], pl_rows) if pl_rows else '<p class="muted">No placement over the limit (or no placement data).</p>'}</section>
+<section><h2>📖 The 17 rules</h2>{table(["Rule", "When", "Verdict"], rule_rows, "small")}
+<p class="tiny">Budget changes max 20% at a time · judge on 7 days · don't edit campaigns in their first 3 days · judge on cost per quality lead and cost per visit, not CPL.</p></section>"""
 
 
 def fatigue_pill(st):
@@ -166,15 +215,38 @@ def render(r: dict) -> str:
     L, P = cmp["last"], cmp["prev"]
 
     # ---------------- SUMMARY
-    pend = f'{L["pending_calls"]}/{L["leads"]} still being called' if L["leads"] else ""
-    kpis1 = "".join([
-        card("Spend", fmt_inr(L["spend"]), delta(L["spend"], P["spend"], neutral=True)),
-        card("Leads (CRM)", num(L["leads"]), delta(L["leads"], P["leads"])),
-        card("CPL", fmt_inr(L["cpl"]), delta(L["cpl"], P["cpl"], good_up=False)),
-        card("Quality leads", num(L["quality"]), delta(L["quality"], P["quality"])),
-        card("Quality %", pc(L["quality_pct"]), delta(L["quality_pct"], P["quality_pct"]) + (f'<div class="tiny">{E(pend)}</div>' if pend else "")),
-        card("Cost / Quality lead", fmt_inr(L["cost_per_quality"]), delta(L["cost_per_quality"], P["cost_per_quality"], good_up=False)),
-    ])
+    def period_block(n, c):
+        Lw, Pw = c["last"], c["prev"]
+        if Pw.get("partial"):   # previous window not fully covered by the data -> no % change
+            Pw = {k: None for k in Pw}
+        pend = f'{Lw["pending_calls"]}/{Lw["leads"]} still being called' if Lw["leads"] else ""
+        money = "".join([
+            card("Spend", fmt_inr(Lw["spend"]), delta(Lw["spend"], Pw["spend"], neutral=True)),
+            card("Leads (CRM)", num(Lw["leads"]), delta(Lw["leads"], Pw["leads"])),
+            card("CPL", fmt_inr(Lw["cpl"]), delta(Lw["cpl"], Pw["cpl"], good_up=False)),
+            card("Quality leads", num(Lw["quality"]), delta(Lw["quality"], Pw["quality"])),
+            card("Quality %", pc(Lw["quality_pct"]), delta(Lw["quality_pct"], Pw["quality_pct"]) + (f'<div class="tiny">{E(pend)}</div>' if pend else "")),
+            card("Cost / Quality lead", fmt_inr(Lw["cost_per_quality"]), delta(Lw["cost_per_quality"], Pw["cost_per_quality"], good_up=False)),
+        ])
+        visits = "".join([
+            card("Will Visit (planned)", num(Lw["will_visit"]), delta(Lw["will_visit"], Pw["will_visit"])),
+            card("Visited (incl. booked)", num(Lw["site_visits"]), delta(Lw["site_visits"], Pw["site_visits"])),
+            card("Booked", num(Lw["booked"]), delta(Lw["booked"], Pw["booked"])),
+            card("Visit %", pc(Lw["visit_ratio_pct"]), delta(Lw["visit_ratio_pct"], Pw["visit_ratio_pct"]) + f'<div class="tiny">target {th["target_visit_ratio_pct"]}%</div>'),
+            card("Cost / Visit", fmt_inr(Lw["cost_per_visit"]), delta(Lw["cost_per_visit"], Pw["cost_per_visit"], good_up=False)),
+            card("Strict quality %", pc(Lw["strict_quality_pct"]), delta(Lw["strict_quality_pct"], Pw["strict_quality_pct"]) + '<div class="tiny">without doubtful</div>'),
+        ])
+        ld = Lw["leads"] or 0
+        f = lambda v: f'{v} ({pc(round(100 * v / ld, 1)) if ld else "—"})'  # noqa: E731
+        strip = (f'<p class="fstrip"><b>Lead funnel:</b> Leads {ld} → Quality {f(Lw["quality"])} → Will Visit+ {f(Lw["will_visit_plus"])} '
+                 f'→ Visited {f(Lw["site_visits"])} → Booked {f(Lw["booked"])}</p>')
+        return (f'<div class="pblock{" on" if n == str(N) else ""}" data-n="{n}">'
+                f'<h2>📅 Last {n} days ({E(Lw["from"])} – {E(Lw["to"])}) vs previous {n} days ({E(c["prev"]["from"])} – {E(c["prev"]["to"])})</h2>'
+                + ('<p class="tiny">Previous period starts before your data — upload a longer date range to see the change %.</p>' if c["prev"].get("partial") else "")
+                + f'<div class="kpis">{money}</div><h3>🏠 Visits</h3><div class="kpis">{visits}</div>{strip}</div>')
+    comps = r.get("compares") or {str(N): cmp}
+    pbtns = "".join(f'<button class="pbtn{" on" if k == str(N) else ""}" data-n="{k}" onclick="sp(\'{k}\')">{k} days</button>' for k in sorted(comps, key=int))
+    periods_html = f'<div class="pbar">Compare: {pbtns}</div>' + "".join(period_block(k, v) for k, v in sorted(comps.items(), key=lambda x: int(x[0])))
     kpis2 = "".join([
         card("Ringing / Busy", num(acc["followup"]), "call again — different time"),
         card("Not reached %", pc(acc["not_reached_pct"]), "of leads called"),
@@ -237,8 +309,7 @@ def render(r: dict) -> str:
                           pc(c["quality_pct"]), bar(c["quality_pct"]), fmt_inr(c["cost_per_quality"]), owner_pill(c["diagnosis"]["owner"]),
                           verdict_pill(c["verdict"])])
     summary_html = f"""
-<section class="band"><h2>📅 Last {N} days ({E(L['from'])} – {E(L['to'])}) vs previous {N} days ({E(P['from'])} – {E(P['to'])})</h2>
-<div class="kpis">{kpis1}</div><h3>📞 Calling status (full period)</h3><div class="kpis alt">{kpis2}</div></section>
+<section class="band">{periods_html}<h3>📞 Calling status (full period)</h3><div class="kpis alt">{kpis2}</div></section>
 <section class="targets"><h2>🎯 Goal check — {th['scale_quality_pct']}% quality leads · {th['target_visit_ratio_pct']}% site visits</h2>
 <div class="tg">{tgt(acc['quality_pct'], th['scale_quality_pct'], 'Quality')} {tgt(acc['strict_quality_pct'], th['scale_quality_pct'], 'Strict quality')} {tgt(acc['visit_ratio_pct'], th['target_visit_ratio_pct'], 'Visits')}
 <span class="muted">Full period · {acc['quality']} quality ({acc['strict_quality']} strict, without doubtful) and {acc['site_visits']} visits from {acc['leads']} leads</span></div>
@@ -385,7 +456,7 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
     rules = r["rules"]
     checks_html = f"""
 <section><h2>🧮 How the numbers are counted</h2><ul>
-<li><b>Quality %</b> = {E(rules['quality_pct'])}. Quality = {E(', '.join(rules['quality_stages']))} — found anywhere in Final Status, Current Status, all Follow-ups or Feedback. Once quality, always quality.</li>
+<li><b>Quality %</b> = {E(rules['quality_pct'])}. Quality = {E(', '.join(rules['quality_stages']))}. <b>CAPI sheets:</b> read from the Final Status column (the CAPI script already keeps a lead quality once it was quality). <b>Sheets without CAPI / empty Final Status:</b> found in Current Status or any Follow-up — once quality, always quality. Feedback is only used to flag doubtful leads.</li>
 <li><b>Visit ratio</b> = {E(rules['visit_ratio'])}.</li>
 <li><b>Verdict</b>: Quality {th['scale_quality_pct']}%+ and visits {th['target_visit_ratio_pct']}%+ = SCALE · {th['optimize_quality_pct']}–{th['scale_quality_pct']}% = OPTIMIZE · {th['review_quality_pct']}–{th['optimize_quality_pct']}% = REVIEW ADS + AUDIENCE · below {th['review_quality_pct']}% = PAUSE / FIX · under {th['low_data_leads']} leads = LOW DATA (judge on CTR / CPM / CPL).</li>
 <li><b>Same rules everywhere</b> — campaigns, ads and the account use the same formula and the same low-data limit.</li></ul></section>
@@ -428,7 +499,7 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
     if ins.get("notes"):
         expert = f'<section class="expert"><h2>🧑‍💼 Expert notes</h2>{ul(ins["notes"])}</section>'
 
-    tabs = [("summary", "Summary", expert + summary_html), ("actions", "Action Plan", actions_html), ("campaigns", "Campaigns", campaigns_html), ("ads", "Ads & Angles", ads_html),
+    tabs = [("summary", "Summary", expert + summary_html), ("optimise", "Optimisation", optimisation_html(r)), ("actions", "Action Plan", actions_html), ("campaigns", "Campaigns", campaigns_html), ("ads", "Ads & Angles", ads_html),
             ("placement", "Platform & Placement", placement_html), ("visits", "Visits & Bookings", visits_html),
             ("leads", "Lead List", leadlist_html), ("checks", "Data Checks", checks_html)]
     nav = "".join(f'<button class="tab{" on" if i == 0 else ""}" data-t="{k}" onclick="sh(\'{k}\')">{E(t)}</button>' for i, (k, t, _) in enumerate(tabs))
@@ -441,6 +512,8 @@ Quality % = quality ÷ total leads</div><nav>{nav}</nav></header><main>{panes}</
 <script>
 function sh(k){{document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='p-'+k));
 document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.t===k));window.scrollTo(0,0);}}
+function sp(n){{document.querySelectorAll('.pblock').forEach(b=>b.classList.toggle('on',b.dataset.n===n));
+document.querySelectorAll('.pbtn').forEach(b=>b.classList.toggle('on',b.dataset.n===n));}}
 function flt(){{const b=document.getElementById('fb').value,d=document.getElementById('fd').checked;let n=0;
 document.querySelectorAll('#lt tbody tr').forEach(tr=>{{const ok=(!b||tr.dataset.b===b)&&(!d||tr.dataset.d==='1');tr.style.display=ok?'':'none';if(ok)n++;}});
 document.getElementById('fcount').textContent=n+' leads';}}
@@ -458,6 +531,10 @@ header{background:var(--head);color:#fff;padding:14px 20px 0;position:sticky;top
 h1{margin:0;font-size:20px}.sub{opacity:.8;font-size:12px;margin:4px 0 10px}
 nav{display:flex;gap:4px;overflow-x:auto}.tab{background:transparent;color:#cfd6df;border:0;padding:9px 14px;font:inherit;cursor:pointer;border-radius:8px 8px 0 0;white-space:nowrap}
 .tab.on{background:var(--surface);color:var(--text);font-weight:600}
+.pbar{display:flex;gap:6px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--muted)}
+.pbtn{border:1px solid var(--line);background:var(--surface);color:var(--text);padding:5px 12px;border-radius:16px;cursor:pointer;font:inherit}
+.pbtn.on{background:var(--head);color:#fff;border-color:var(--head);font-weight:600}
+.pblock{display:none}.pblock.on{display:block}.fstrip{margin:10px 0 4px;font-size:13px}
 main{max-width:1280px;margin:0 auto;padding:16px}.pane{display:none}.pane.on{display:block}
 section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}
 section.band{background:var(--band)}h2{font-size:16px;margin:0 0 10px}h3{font-size:14px;margin:12px 0 6px;color:var(--text2)}
