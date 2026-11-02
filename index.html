@@ -91,6 +91,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
     <div class="btns">
       <button class="btn primary" id="dl">⬇️ Download dashboard</button>
       <button class="btn" id="pdf">🖨 Download PDF</button>
+      <button class="btn" id="cpdf">📄 Client PDF</button>
       <button class="btn" id="full">⤢ Open full screen</button>
     </div>
     <iframe id="view" title="Dashboard"></iframe>
@@ -99,7 +100,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
 <footer>Engine <span id="ver"></span> · Same engine as the Agency Ops agent · Quality % = quality leads ÷ total leads · Visit ratio = (Visited + Booked) ÷ total leads</footer>
 
 <script>
-const ENGINE_VERSION = "202611020803";
+const ENGINE_VERSION = "202611021010";
 const ENGINE_FILES = ["lead_quality.py", "purekit.py", "optimizer.py", "campaign_dashboard.py", "dashboard_html.py", "default_config.json", "clients.json"];
 const WHEELS = ["openpyxl-3.1.5-py2.py3-none-any.whl", "et_xmlfile-2.0.0-py3-none-any.whl"];
 const WEBAPP_PY = `
@@ -110,7 +111,7 @@ from lead_quality import deep_merge
 BASE = json.loads(Path('/engine/default_config.json').read_text(encoding='utf-8'))
 CLIENTS = json.loads(Path('/engine/clients.json').read_text(encoding='utf-8'))
 
-def generate(names_json, client_key, client_name, d_from, d_to):
+def generate(names_json, client_key, client_name, d_from, d_to, start_tab='summary'):
     try:
         names = json.loads(names_json)
         cfg = deep_merge(BASE, (CLIENTS.get(client_key) or {}).get('config', {}))
@@ -124,13 +125,15 @@ def generate(names_json, client_key, client_name, d_from, d_to):
                    'tq': th['scale_quality_pct'], 'tv': th['target_visit_ratio_pct'], 'period': rep['period'], 'files': rep['files'],
                    'campaigns': len(rep['campaigns'])}
         warns = [c['text'] for c in rep['checks'] if c['type'] == 'warn'][:6]
-        return json.dumps({'ok': True, 'html': dh.render(rep), 'summary': summary, 'warns': warns})
+        bad = [x['name'] for x in rep.get('reconcile', []) if not x['ok']]
+        return json.dumps({'ok': True, 'html': dh.render(rep, start_tab), 'summary': summary, 'warns': warns, 'mismatch': bad,
+                           'range': rep.get('range')})
     except Exception as e:
         import traceback
         return json.dumps({'ok': False, 'error': str(e), 'trace': traceback.format_exc()[-1500:]})
 `;
 const $ = id => document.getElementById(id);
-let py = null, booting = null, files = [], lastHtml = "", clients = {};
+let py = null, booting = null, files = [], lastHtml = "", clients = {}, last = null;
 
 function status(msg, pctDone, err) {
   $("status").textContent = msg; $("status").className = err ? "err" : "";
@@ -183,41 +186,63 @@ async function loadClients() {
 }
 const inr = x => x == null ? "—" : "₹" + Math.round(x).toLocaleString("en-IN");
 
+function projectName() { const key = $("client").value; return key === "__other" ? ($("otherName").value.trim() || "Project") : clients[key].name; }
+function runEngine(d_from, d_to, tab) {
+  const gen = py.globals.get("generate");
+  const res = JSON.parse(gen(JSON.stringify(last.names), last.key, last.name, d_from || "", d_to || "", tab || "summary"));
+  gen.destroy && gen.destroy();
+  return res;
+}
+function show(res) {
+  lastHtml = res.html;
+  const s = res.summary, ok = (v, t) => v >= t ? "ok" : "no";
+  $("kpis").innerHTML = [
+    ["Leads", s.leads, ""], ["Quality %", s.quality_pct + "%", ok(s.quality_pct, s.tq)], ["Strict quality", s.strict_quality_pct + "%", ok(s.strict_quality_pct, s.tq)],
+    ["Visit ratio", s.visit_ratio_pct + "%", ok(s.visit_ratio_pct, s.tv)], ["CPL", inr(s.cpl), ""]
+  ].map(([l, v, c]) => `<div class="kpi"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join("");
+  const w = res.warns.map(w => `<li>⚠️ ${w.replace(/^⚠️\s*/, "").replace(/</g, "&lt;")}</li>`);
+  if (res.mismatch && res.mismatch.length) w.unshift(`<li>❌ Numbers do not match between tabs: ${res.mismatch.join("; ")}</li>`);
+  $("warns").innerHTML = w.join("");
+  $("view").srcdoc = lastHtml;
+  $("result").style.display = "block";
+  status(`Done — ${s.leads} leads, ${s.campaigns} campaigns (${s.period.from} – ${s.period.to}).`);
+}
 async function generate() {
   if (!files.length) { status("Pehle files choose karo (kam se kam CRM sheet).", null, true); return; }
   $("go").disabled = true; $("result").style.display = "none";
   try {
     await boot();
     status("Reading files…", 70);
+    if (last) for (const n of last.names) { try { py.FS.unlink("/uploads/" + n); } catch (e) {} }
     const names = [];
     for (const f of files) {
       const safe = f.name.replace(/[\\/]/g, "_");
       py.FS.writeFile("/uploads/" + safe, new Uint8Array(await f.arrayBuffer())); names.push(safe);
     }
-    status("Reading every status, follow-up and feedback… building dashboard", 85);
+    last = { names, key: $("client").value, name: projectName() };   // kept so the dashboard's date selector can re-run the engine
+    status("Reading every status and follow-up… building dashboard", 85);
     await new Promise(r => setTimeout(r, 30));
-    const key = $("client").value;
-    const name = key === "__other" ? ($("otherName").value.trim() || "Project") : clients[key].name;
-    const gen = py.globals.get("generate");
-    const res = JSON.parse(gen(JSON.stringify(names), key, name, $("from").value || "", $("to").value || ""));
-    gen.destroy && gen.destroy();
-    for (const n of names) { try { py.FS.unlink("/uploads/" + n); } catch (e) {} }
+    const res = runEngine($("from").value, $("to").value, "summary");
     if (!res.ok) { status("❌ " + res.error, null, true); console.error(res.trace); return; }
-    lastHtml = res.html;
-    const s = res.summary, ok = (v, t) => v >= t ? "ok" : "no";
-    $("kpis").innerHTML = [
-      ["Leads", s.leads, ""], ["Quality %", s.quality_pct + "%", ok(s.quality_pct, s.tq)], ["Strict quality", s.strict_quality_pct + "%", ok(s.strict_quality_pct, s.tq)],
-      ["Visit ratio", s.visit_ratio_pct + "%", ok(s.visit_ratio_pct, s.tv)], ["CPL", inr(s.cpl), ""]
-    ].map(([l, v, c]) => `<div class="kpi"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join("");
-    $("warns").innerHTML = res.warns.map(w => `<li>⚠️ ${w.replace(/^⚠️\s*/, "").replace(/</g, "&lt;")}</li>`).join("");
-    $("view").srcdoc = lastHtml;
-    $("result").style.display = "block";
-    status(`Done — ${s.leads} leads, ${s.campaigns} campaigns (${s.period.from} – ${s.period.to}).`);
+    show(res);
     $("result").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     status("❌ " + (e.message || e), null, true); console.error(e);
   } finally { $("go").disabled = false; }
 }
+// Date selector inside the dashboard -> re-run the same engine on the same files for the new range
+window.addEventListener("message", async ev => {
+  const m = ev.data || {};
+  if (m.type !== "ld-range" || !last || !py) return;
+  status(`Updating for ${m.from || "start"} – ${m.to || "end"}…`, 85);
+  await new Promise(r => setTimeout(r, 20));
+  try {
+    const res = runEngine(m.from, m.to, m.tab);
+    if (!res.ok) { status("❌ " + res.error, null, true); return; }
+    $("from").value = m.from || ""; $("to").value = m.to || "";
+    show(res);
+  } catch (e) { status("❌ " + (e.message || e), null, true); }
+});
 function download() {
   const blob = new Blob([lastHtml], { type: "text/html" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -231,6 +256,11 @@ function pdf() {
   if (!w) { status("Pop-up blocked — allow pop-ups for this site, or use Download dashboard.", null, true); return; }
   w.addEventListener("load", () => setTimeout(() => w.print(), 400));
 }
+function clientPdf() {
+  // opens the dashboard with only the Client Report tab and the print dialog -> "Save as PDF"
+  const w = window.open(URL.createObjectURL(new Blob([lastHtml], { type: "text/html" })) + "#clientpdf", "_blank");
+  if (!w) status("Pop-up blocked — allow pop-ups for this site, or use the button inside the Client Report tab.", null, true);
+}
 function fullscreen() { const w = window.open(URL.createObjectURL(new Blob([lastHtml], { type: "text/html" })), "_blank"); if (!w) download(); }
 
 $("ver").textContent = ENGINE_VERSION;
@@ -240,7 +270,7 @@ $("file").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
 ["dragover", "dragenter"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
 ["dragleave", "drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
 $("drop").addEventListener("drop", e => addFiles(e.dataTransfer.files));
-$("go").onclick = generate; $("dl").onclick = download; $("full").onclick = fullscreen; $("pdf").onclick = pdf;
+$("go").onclick = generate; $("dl").onclick = download; $("full").onclick = fullscreen; $("pdf").onclick = pdf; $("cpdf").onclick = clientPdf;
 loadClients();
 boot().catch(e => status("❌ Engine could not load: " + (e.message || e), null, true));   // warm up while the user picks files
 </script>

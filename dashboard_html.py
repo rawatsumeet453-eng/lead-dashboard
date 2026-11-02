@@ -208,45 +208,146 @@ def lead_table(rows, show_feedback=True):
 
 
 # ======================================================================================
-def render(r: dict) -> str:
+def period_cards(Lw, Pw, th, client=False):
+    """KPI cards for one period vs the previous one. Used by Summary AND the Client Report, so both always match."""
+    if Pw is None or Pw.get("partial"):   # previous window not fully covered by the data -> no % change
+        Pw = {k: None for k in Lw}
+    pend = f'{Lw["pending_calls"]}/{Lw["leads"]} still being called' if Lw.get("leads") else ""
+    money = "".join([
+        card("Spend", fmt_inr(Lw["spend"]), delta(Lw["spend"], Pw["spend"], neutral=True)),
+        card("Leads (CRM)", num(Lw["leads"]), delta(Lw["leads"], Pw["leads"])),
+        card("CPL", fmt_inr(Lw["cpl"]), delta(Lw["cpl"], Pw["cpl"], good_up=False)),
+        card("Quality leads", num(Lw["quality"]), delta(Lw["quality"], Pw["quality"])),
+        card("Quality %", pc(Lw["quality_pct"]), delta(Lw["quality_pct"], Pw["quality_pct"]) + (f'<div class="tiny">{E(pend)}</div>' if pend else "")),
+        card("Cost / Quality lead", fmt_inr(Lw["cost_per_quality"]), delta(Lw["cost_per_quality"], Pw["cost_per_quality"], good_up=False)),
+    ])
+    visits = "".join([
+        card("Will Visit (planned)", num(Lw["will_visit"]), delta(Lw["will_visit"], Pw["will_visit"])),
+        card("Visited (incl. booked)", num(Lw["site_visits"]), delta(Lw["site_visits"], Pw["site_visits"])),
+        card("Booked", num(Lw["booked"]), delta(Lw["booked"], Pw["booked"])),
+        card("Visit %", pc(Lw["visit_ratio_pct"]), delta(Lw["visit_ratio_pct"], Pw["visit_ratio_pct"]) + f'<div class="tiny">target {th["target_visit_ratio_pct"]}%</div>'),
+        card("Cost / Visit", fmt_inr(Lw["cost_per_visit"]), delta(Lw["cost_per_visit"], Pw["cost_per_visit"], good_up=False)),
+        (card("Cost / Booking", fmt_inr(Lw["cost_per_booking"]), delta(Lw["cost_per_booking"], Pw["cost_per_booking"], good_up=False)) if client else
+         card("Strict quality %", pc(Lw["strict_quality_pct"]), delta(Lw["strict_quality_pct"], Pw["strict_quality_pct"]) + '<div class="tiny">without doubtful</div>')),
+    ])
+    ld = Lw["leads"] or 0
+    f = lambda v: f'{v} ({pc(round(100 * v / ld, 1)) if ld else "—"})'  # noqa: E731
+    strip = (f'<p class="fstrip"><b>Lead funnel:</b> Leads {ld} → Quality {f(Lw["quality"])} → Will Visit+ {f(Lw["will_visit_plus"])} '
+             f'→ Visited {f(Lw["site_visits"])} → Booked {f(Lw["booked"])}</p>')
+    return money, visits, strip
+
+
+def account_period(acc):
+    """The account totals in the same shape as a compare window (no previous period)."""
+    a = dict(acc)
+    a.setdefault("pending_calls", acc.get("not_called", 0) + acc.get("followup", 0))
+    return a
+
+
+def client_html(r):
+    """Client-safe report: same numbers as Summary (same objects), no lead names / phones / internal flags."""
+    acc, th, ins = r["account"], r["rules"]["thresholds"], (r.get("insights") or {})
+    sel = r.get("selected")
+    last = sel["last"] if sel else account_period(acc)
+    prev = sel["prev"] if sel else None
+    money, visits, strip = period_cards(last, prev, th, client=True)
+    has_spend = bool(acc.get("spend"))
+    rng = f'{r["period"]["from"]} – {r["period"]["to"]}'
+    cmp_line = (f'<span class="cmpnote"> · compared with previous {sel["days"]} days ({E(sel["prev"]["from"])} – {E(sel["prev"]["to"])})</span>'
+                if sel and not sel["prev"].get("partial") else "")
+    camps = [c for c in r["campaigns"] if c["leads"] or (c.get("spend") or 0) > 0]
+    c_rows = [[f'<b>{E(c["campaign"] if c["campaign"] != "(no campaign name)" else "Other / not tagged")}</b>', fmt_inr(c["spend"]), num(c["leads"]),
+               fmt_inr(c["cpl"]), num(c["quality"]), pc(c["quality_pct"]), fmt_inr(c["cost_per_quality"]), num(c["will_visit"]), num(c["site_visits"]),
+               num(c["booked"])] for c in camps]
+    named = [a for a in r["ads"] if a["ad"] != "(no ad name)" and a["leads"]]
+    top_ads = sorted(named, key=lambda a: (-a["quality"], -a["leads"]))[:8]
+    multi = len({a["campaign"] for a in top_ads}) > 1
+    a_rows = [[f'<b>{E(a["ad"])}</b>' + (f'<div class="tiny">{E(a["campaign"])}</div>' if multi else ""), E(a.get("format", "")), fmt_inr(a.get("spend")), num(a["leads"]), fmt_inr(a.get("cpl")), num(a["quality"]),
+               pc(a["quality_pct"]), fmt_inr(a.get("cost_per_quality")), num(a["site_visits"])] for a in top_ads]
+    call = "".join([
+        card("Leads called", num(acc["called"]), f'of {acc["leads"]}'),
+        card("Ringing / busy", num(acc["followup"]), "being called again"),
+        card("Not reached %", pc(acc["not_reached_pct"]), "of leads called"),
+        card("Not called yet", num(acc["not_called"])),
+        card("Interested / details shared", num(acc["details_callback"] + acc["interested"]), "being followed up for a visit"),
+        card("Not relevant (dead)", num(acc["dead"])),
+    ])
+    dead_rows = [[E(k), num(v), pc(round(100 * v / acc["leads"], 1) if acc["leads"] else 0)] for k, v in list(acc["dead_reasons"].items())[:6]]
+    # plain-English summary for a developer client (agent can override with insights.client_summary / client_next_steps)
+    summ = ins.get("client_summary") or []
+    if not summ:
+        summ.append(f'{acc["leads"]} leads' + (f' at {fmt_inr(acc["cpl"])} per lead ({fmt_inr(acc["spend"])} spent).' if has_spend else '.'))
+        summ.append(f'{acc["quality"]} quality leads ({acc["quality_pct"]}%) — people who shared details, asked for a call back, showed interest, '
+                    f'planned or made a site visit. Target {th["scale_quality_pct"]}%.' + (f' Cost per quality lead {fmt_inr(acc["cost_per_quality"])}.' if has_spend else ''))
+        summ.append(f'{acc["will_visit"]} site visits planned, {acc["site_visits"]} visited' + (f', {acc["booked"]} booked.' if acc["booked"] else '.')
+                    + f' Visit ratio {acc["visit_ratio_pct"]}% (target {th["target_visit_ratio_pct"]}%).')
+        if camps:
+            b = max(camps, key=lambda c: (c["quality"], -(c["cost_per_quality"] or 0)))
+            summ.append(f'Best campaign: {b["campaign"]} — {b["quality"]} quality leads ({b["quality_pct"]}%).')
+        if top_ads:
+            summ.append(f'Best ad: {top_ads[0]["ad"]} — {top_ads[0]["quality"]} quality of {top_ads[0]["leads"]} leads.')
+    steps = ins.get("client_next_steps") or []
+    if not steps:
+        if acc["will_visit"]:
+            steps.append(f'Confirm the {acc["will_visit"]} planned site visits with a reminder the day before and on the morning of the visit.')
+        if acc["details_callback"] + acc["interested"]:
+            steps.append(f'Follow up the {acc["details_callback"] + acc["interested"]} interested / details-shared leads with fixed site-visit slots.')
+        if acc["quality_pct"] < th["scale_quality_pct"]:
+            steps.append('Refresh the ad creatives and add qualifying questions (budget, possession timeline) to the lead form to raise lead quality.')
+        elif acc["visit_ratio_pct"] >= th["target_visit_ratio_pct"]:
+            steps.append('Increase budget gradually (15–20% at a time) on the best campaign while quality stays above target.')
+        else:
+            steps.append('Keep budget steady until more of the quality leads convert into site visits.')
+        if acc["not_reached_pct"] >= 25:
+            steps.append('Call every new lead within 5 minutes and retry unanswered leads at different times of the day.')
+    return f"""
+<section class="band client-head"><div class="ch"><h2>🏢 {E(r['client'].replace("-", " ").title() if r['client'].islower() else r['client'])} — Meta Ads lead report</h2>
+<button class="btn noprint" onclick="clientPdf()">⬇ Download client PDF</button></div>
+<p class="muted">Period: <b>{E(rng)}</b>{cmp_line} · Generated {E(r['generated_at'])}</p>
+<div class="kpis">{money}</div><h3>🏠 Site visits & bookings</h3><div class="kpis">{visits}</div>{strip}</section>
+<section><h2>Summary</h2>{ul(summ)}</section>
+<section><h2>Campaign performance</h2>{table(["Campaign", "Spend", "Leads", "CPL", "Quality leads", "Quality %", "Cost / quality lead", "Will visit", "Visited", "Booked"], c_rows)}</section>
+<section><h2>Top ads</h2>{table(["Ad", "Format", "Spend", "Leads", "CPL", "Quality leads", "Quality %", "Cost / quality lead", "Visited"], a_rows) if a_rows else '<p class="muted">Ad names not available in this data.</p>'}</section>
+<section class="two"><div><h2>Calling status</h2><div class="kpis k3">{call}</div></div>
+<div><h2>Why leads were not relevant</h2>{table(["Reason", "Leads", "% of all leads"], dead_rows) if dead_rows else '<p class="muted">No dead leads.</p>'}</div></section>
+<section><h2>Next steps</h2>{ul(steps)}</section>
+<p class="tiny">Quality leads = Details shared, Call back, Interested, Will visit, Visited, Booked. Quality % and Visit % are of all leads. Duplicate and test leads are removed.</p>"""
+
+
+def reconcile_html(r):
+    rows = [[("✅" if x["ok"] else "❌"), E(x["name"]), E(x["a"]), E(x["b"])] for x in (r.get("reconcile") or [])]
+    if not rows:
+        return ""
+    bad = sum(1 for x in r["reconcile"] if not x["ok"])
+    head = ("✅ All tabs use the same numbers." if not bad else f"❌ {bad} check(s) do not match — tell Claude before sending this report.")
+    return f'<section><h2>🔁 Accuracy check — every tab must match</h2><p>{head}</p>{table(["", "Check", "Value", "Should equal"], rows, "small")}</section>'
+
+
+def render(r: dict, start_tab: str = "summary") -> str:
     acc, cmp, th = r["account"], r["compare"], r["rules"]["thresholds"]
     ins = r.get("insights") or {}
     N = r["rules"]["compare_days"]
     L, P = cmp["last"], cmp["prev"]
 
     # ---------------- SUMMARY
-    def period_block(n, c):
-        Lw, Pw = c["last"], c["prev"]
-        if Pw.get("partial"):   # previous window not fully covered by the data -> no % change
-            Pw = {k: None for k in Pw}
-        pend = f'{Lw["pending_calls"]}/{Lw["leads"]} still being called' if Lw["leads"] else ""
-        money = "".join([
-            card("Spend", fmt_inr(Lw["spend"]), delta(Lw["spend"], Pw["spend"], neutral=True)),
-            card("Leads (CRM)", num(Lw["leads"]), delta(Lw["leads"], Pw["leads"])),
-            card("CPL", fmt_inr(Lw["cpl"]), delta(Lw["cpl"], Pw["cpl"], good_up=False)),
-            card("Quality leads", num(Lw["quality"]), delta(Lw["quality"], Pw["quality"])),
-            card("Quality %", pc(Lw["quality_pct"]), delta(Lw["quality_pct"], Pw["quality_pct"]) + (f'<div class="tiny">{E(pend)}</div>' if pend else "")),
-            card("Cost / Quality lead", fmt_inr(Lw["cost_per_quality"]), delta(Lw["cost_per_quality"], Pw["cost_per_quality"], good_up=False)),
-        ])
-        visits = "".join([
-            card("Will Visit (planned)", num(Lw["will_visit"]), delta(Lw["will_visit"], Pw["will_visit"])),
-            card("Visited (incl. booked)", num(Lw["site_visits"]), delta(Lw["site_visits"], Pw["site_visits"])),
-            card("Booked", num(Lw["booked"]), delta(Lw["booked"], Pw["booked"])),
-            card("Visit %", pc(Lw["visit_ratio_pct"]), delta(Lw["visit_ratio_pct"], Pw["visit_ratio_pct"]) + f'<div class="tiny">target {th["target_visit_ratio_pct"]}%</div>'),
-            card("Cost / Visit", fmt_inr(Lw["cost_per_visit"]), delta(Lw["cost_per_visit"], Pw["cost_per_visit"], good_up=False)),
-            card("Strict quality %", pc(Lw["strict_quality_pct"]), delta(Lw["strict_quality_pct"], Pw["strict_quality_pct"]) + '<div class="tiny">without doubtful</div>'),
-        ])
-        ld = Lw["leads"] or 0
-        f = lambda v: f'{v} ({pc(round(100 * v / ld, 1)) if ld else "—"})'  # noqa: E731
-        strip = (f'<p class="fstrip"><b>Lead funnel:</b> Leads {ld} → Quality {f(Lw["quality"])} → Will Visit+ {f(Lw["will_visit_plus"])} '
-                 f'→ Visited {f(Lw["site_visits"])} → Booked {f(Lw["booked"])}</p>')
-        return (f'<div class="pblock{" on" if n == str(N) else ""}" data-n="{n}">'
-                f'<h2>📅 Last {n} days ({E(Lw["from"])} – {E(Lw["to"])}) vs previous {n} days ({E(c["prev"]["from"])} – {E(c["prev"]["to"])})</h2>'
-                + ('<p class="tiny">Previous period starts before your data — upload a longer date range to see the change %.</p>' if c["prev"].get("partial") else "")
+    def period_block(n, c, title=None, on=None):
+        money, visits, strip = period_cards(c["last"], c["prev"], th)
+        title = title or (f'📅 Last {n} days ({E(c["last"]["from"])} – {E(c["last"]["to"])}) '
+                          f'<span class="cmpnote">vs previous {n} days ({E(c["prev"]["from"])} – {E(c["prev"]["to"])})</span>')
+        on = (n == str(N)) if on is None else on
+        return (f'<div class="pblock{" on" if on else ""}" data-n="{n}"><h2>{title}</h2>'
+                + ('<p class="tiny cmpnote">Previous period starts before your data — upload a longer date range to see the change %.</p>' if c["prev"].get("partial") else "")
                 + f'<div class="kpis">{money}</div><h3>🏠 Visits</h3><div class="kpis">{visits}</div>{strip}</div>')
-    comps = r.get("compares") or {str(N): cmp}
-    pbtns = "".join(f'<button class="pbtn{" on" if k == str(N) else ""}" data-n="{k}" onclick="sp(\'{k}\')">{k} days</button>' for k in sorted(comps, key=int))
-    periods_html = f'<div class="pbar">Compare: {pbtns}</div>' + "".join(period_block(k, v) for k, v in sorted(comps.items(), key=lambda x: int(x[0])))
+    sel = r.get("selected")
+    if sel:
+        periods_html = period_block(str(sel["days"]), sel, on=True, title=(
+            f'📅 Selected period: {E(sel["from"])} – {E(sel["to"])} ({sel["days"]} days) '
+            f'<span class="cmpnote">vs previous {sel["days"]} days ({E(sel["prev"]["from"])} – {E(sel["prev"]["to"])})</span>'))
+    else:
+        comps = r.get("compares") or {str(N): cmp}
+        pbtns = "".join(f'<button class="pbtn{" on" if k == str(N) else ""}" data-n="{k}" onclick="sp(\'{k}\')">{k} days</button>' for k in sorted(comps, key=int))
+        periods_html = (f'<div class="pbar">Recent trend (within your data): {pbtns}</div>'
+                        + "".join(period_block(k, v) for k, v in sorted(comps.items(), key=lambda x: int(x[0]))))
     kpis2 = "".join([
         card("Ringing / Busy", num(acc["followup"]), "call again — different time"),
         card("Not reached %", pc(acc["not_reached_pct"]), "of leads called"),
@@ -460,6 +561,7 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
 <li><b>Visit ratio</b> = {E(rules['visit_ratio'])}.</li>
 <li><b>Verdict</b>: Quality {th['scale_quality_pct']}%+ and visits {th['target_visit_ratio_pct']}%+ = SCALE · {th['optimize_quality_pct']}–{th['scale_quality_pct']}% = OPTIMIZE · {th['review_quality_pct']}–{th['optimize_quality_pct']}% = REVIEW ADS + AUDIENCE · below {th['review_quality_pct']}% = PAUSE / FIX · under {th['low_data_leads']} leads = LOW DATA (judge on CTR / CPM / CPL).</li>
 <li><b>Same rules everywhere</b> — campaigns, ads and the account use the same formula and the same low-data limit.</li></ul></section>
+{reconcile_html(r)}
 <section><h2>🛠 Data checks for this report</h2><ul class="checks">{chk}</ul>
 <p class="tiny">Files used: {E(json.dumps(r['files']))}</p></section>"""
 
@@ -499,18 +601,34 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
     if ins.get("notes"):
         expert = f'<section class="expert"><h2>🧑‍💼 Expert notes</h2>{ul(ins["notes"])}</section>'
 
-    tabs = [("summary", "Summary", expert + summary_html), ("optimise", "Optimisation", optimisation_html(r)), ("actions", "Action Plan", actions_html), ("campaigns", "Campaigns", campaigns_html), ("ads", "Ads & Angles", ads_html),
+    bad = [x for x in (r.get("reconcile") or []) if not x["ok"]]
+    if bad:
+        expert = ('<section class="bbox"><h2>❌ Numbers do not match between tabs</h2>' + ul([f'{x["name"]}: {x["a"]} vs {x["b"]}' for x in bad])
+                  + '<p class="tiny">Do not send this report — see Data Checks.</p></section>') + expert
+    tabs = [("summary", "Summary", expert + summary_html), ("client", "Client Report", client_html(r)), ("optimise", "Optimisation", optimisation_html(r)), ("actions", "Action Plan", actions_html), ("campaigns", "Campaigns", campaigns_html), ("ads", "Ads & Angles", ads_html),
             ("placement", "Platform & Placement", placement_html), ("visits", "Visits & Bookings", visits_html),
             ("leads", "Lead List", leadlist_html), ("checks", "Data Checks", checks_html)]
-    nav = "".join(f'<button class="tab{" on" if i == 0 else ""}" data-t="{k}" onclick="sh(\'{k}\')">{E(t)}</button>' for i, (k, t, _) in enumerate(tabs))
-    panes = "".join(f'<div class="pane{" on" if i == 0 else ""}" id="p-{k}"><h1 class="ptitle">{E(t)}</h1>{body}</div>' for i, (k, t, body) in enumerate(tabs))
+    keys = [k for k, _, _ in tabs]
+    first = start_tab if start_tab in keys else "summary"
+    nav = "".join(f'<button class="tab{" on" if k == first else ""}" data-t="{k}" onclick="sh(\'{k}\')">{E(t)}</button>' for k, t, _ in tabs)
+    panes = "".join(f'<div class="pane{" on" if k == first else ""}" id="p-{k}"><h1 class="ptitle">{E(t)}</h1>{body}</div>' for k, t, body in tabs)
+    rg = r.get("range") or {}
+    qbtns = "".join(f'<button class="qb" data-q="{n}" onclick="qn({n})">{n} days</button>' for n in (7, 14, 30, 45, 60))
+    rbar = (f'<div class="rbar noprint"><span class="rl">Period:</span>{qbtns}<button class="qb" data-q="all" onclick="qn(\'all\')">All data</button>'
+            f'<span class="rl">From</span><input type="date" id="rf" value="{E(rg.get("from") or "")}" min="{E(rg.get("data_min") or "")}" max="{E(rg.get("data_max") or "")}">'
+            f'<span class="rl">To</span><input type="date" id="rt" value="{E(rg.get("to") or "")}" min="{E(rg.get("data_min") or "")}" max="{E(rg.get("data_max") or "")}">'
+            f'<button class="qb go" onclick="apply()">Apply</button>'
+            f'<label class="rl"><input type="checkbox" id="rc" checked onchange="cmpToggle()"> Compare with previous period</label><span id="rmsg" class="tiny"></span></div>')
+    rjs = json.dumps({"from": rg.get("from"), "to": rg.get("to"), "data_min": rg.get("data_min"), "data_max": rg.get("data_max"),
+                      "custom": bool(rg.get("custom")), "start": first})
     title = f'{r["client"].replace("-", " ").title()} — Meta Lead Ads Dashboard'
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{E(title)}</title><style>{CSS}</style></head><body class="viz-root">
 <header><h1>📊 {E(title)}</h1><div class="sub">Data: {E(r['period']['from'])} – {E(r['period']['to'])} · Generated {E(r['generated_at'])} ·
-Quality % = quality ÷ total leads</div><nav>{nav}</nav></header><main>{panes}</main>
+Quality % = quality ÷ total leads</div>{rbar}<nav>{nav}</nav></header><main>{panes}</main>
 <script>
-function sh(k){{document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='p-'+k));
+const RANGE={rjs};let CUR=RANGE.start;
+function sh(k){{CUR=k;document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='p-'+k));
 document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.t===k));window.scrollTo(0,0);}}
 function sp(n){{document.querySelectorAll('.pblock').forEach(b=>b.classList.toggle('on',b.dataset.n===n));
 document.querySelectorAll('.pbtn').forEach(b=>b.classList.toggle('on',b.dataset.n===n));}}
@@ -518,6 +636,22 @@ function flt(){{const b=document.getElementById('fb').value,d=document.getElemen
 document.querySelectorAll('#lt tbody tr').forEach(tr=>{{const ok=(!b||tr.dataset.b===b)&&(!d||tr.dataset.d==='1');tr.style.display=ok?'':'none';if(ok)n++;}});
 document.getElementById('fcount').textContent=n+' leads';}}
 flt();
+function ymd(s){{const a=s.split('-').map(Number);return Date.UTC(a[0],a[1]-1,a[2]);}}
+function iso(t){{return new Date(t).toISOString().slice(0,10);}}
+function msg(t){{document.getElementById('rmsg').textContent=t;}}
+function go(f,t){{
+  if(window.parent&&window.parent!==window){{window.parent.postMessage({{type:'ld-range',from:f,to:t,tab:CUR}},'*');msg('Updating…');}}
+  else msg('Period change works on the website (upload the files there).');}}
+function qn(n){{if(n==='all'){{go('','');return;}}if(!RANGE.data_max)return;const t=ymd(RANGE.data_max);go(iso(t-(n-1)*864e5),RANGE.data_max);}}
+function apply(){{const f=document.getElementById('rf').value,t=document.getElementById('rt').value;
+  if(f&&t&&f>t){{msg('From date is after To date.');return;}}go(f,t);}}
+function cmpToggle(){{document.body.classList.toggle('nocmp',!document.getElementById('rc').checked);}}
+function clientPdf(){{sh('client');document.body.classList.add('client-print');setTimeout(()=>{{window.print();setTimeout(()=>document.body.classList.remove('client-print'),800);}},150);}}
+(function(){{let on='all';
+  if(RANGE.custom&&RANGE.to===RANGE.data_max&&RANGE.from){{const n=Math.round((ymd(RANGE.to)-ymd(RANGE.from))/864e5)+1;if([7,14,30,45,60].includes(n))on=String(n);else on='';}}
+  else if(RANGE.custom)on='';
+  document.querySelectorAll('.qb[data-q]').forEach(b=>b.classList.toggle('on',b.dataset.q===on));
+  if(location.hash==='#clientpdf')setTimeout(clientPdf,400);}})();
 </script></body></html>"""
 
 
@@ -535,6 +669,15 @@ nav{display:flex;gap:4px;overflow-x:auto}.tab{background:transparent;color:#cfd6
 .pbtn{border:1px solid var(--line);background:var(--surface);color:var(--text);padding:5px 12px;border-radius:16px;cursor:pointer;font:inherit}
 .pbtn.on{background:var(--head);color:#fff;border-color:var(--head);font-weight:600}
 .pblock{display:none}.pblock.on{display:block}.fstrip{margin:10px 0 4px;font-size:13px}
+.rbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 6px;font-size:13px;color:#cfd6df}
+.rbar .rl{margin-left:6px}.rbar input[type=date]{font:inherit;padding:3px 6px;border-radius:6px;border:1px solid #4a5563;background:#2b3644;color:#fff}
+.qb{border:1px solid #4a5563;background:transparent;color:#e6ebf1;padding:4px 10px;border-radius:14px;cursor:pointer;font:inherit}
+.qb.on{background:#fff;color:#1f2a37;font-weight:600}.qb.go{background:var(--series);border-color:var(--series);color:#fff}
+#rmsg{color:#ffd27a;margin-left:6px}
+.nocmp .cmpnote,.nocmp .kpi .d{display:none}
+.client-head .ch{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--text);padding:6px 12px;border-radius:8px;cursor:pointer;font:inherit}
+.kpis.k3{grid-template-columns:repeat(3,1fr)}
 main{max-width:1280px;margin:0 auto;padding:16px}.pane{display:none}.pane.on{display:block}
 section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}
 section.band{background:var(--band)}h2{font-size:16px;margin:0 0 10px}h3{font-size:14px;margin:12px 0 6px;color:var(--text2)}
@@ -586,7 +729,9 @@ ul{margin:4px 0;padding-left:20px}li{margin:3px 0}
   section.camp{break-inside:auto;page-break-inside:auto}
   table{font-size:10px}th,td{padding:4px 6px}
   .tw{overflow:visible}.kv{font-size:18px}
-  .filters{display:none}
+  .filters{display:none}.noprint,.rbar{display:none!important}
+  .client-print .pane{display:none!important}.client-print #p-client{display:block!important;page-break-before:auto}
+  .client-print header .sub{display:none}
   #p-leads,.leadlist{display:none!important}
   .pdf-full #p-leads{display:block!important}.pdf-full .leadlist{display:block!important}
   .pdf-full #p-leads tbody tr{display:table-row!important}

@@ -668,6 +668,17 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     if not ads:
         checks.append(("warn", "No Meta Ads export found — spend, CPL and cost numbers are blank. Add the Ads Manager CSV."))
 
+    # full data kept for "previous period" comparisons and for the date selector limits
+    crm_raw, ads_raw = list(crm), list(ads)
+    _all_days = [r["date"].date() for r in crm_raw if r["date"]] + [r["day"].date() for r in ads_raw if r["day"]]
+    data_min = min(_all_days) if _all_days else None
+    data_max = max(_all_days) if _all_days else None
+    ads_have_days = any(r["day"] is not None for r in ads_raw)
+    if (d_from or d_to) and ads and not ads_have_days:
+        checks.append(("warn", "The Meta Ads export has no Day column, so spend cannot be split by date — spend, CPL and cost numbers "
+                               "are left blank for this date range. Export with the Day breakdown to fix."))
+        ads = []
+
     # period filter (IST dates)
     if d_from or d_to:
         lo = dt.datetime.combine(d_from, dt.time()) if d_from else dt.datetime.min
@@ -739,6 +750,29 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
         return out
     compare = window_compare(N)
     compares = {str(n): (compare if n == N else window_compare(n)) for n in sorted({7, 14, 30, N})}
+
+    # ---------------- selected date range vs the previous range of the same length (same maths as everywhere else)
+    selected = None
+    if d_from or d_to:
+        f = d_from or data_min
+        t_ = d_to or data_max
+        n_days = (t_ - f).days + 1
+        pf, pt = f - dt.timedelta(days=n_days), f - dt.timedelta(days=1)
+
+        def period_stats(rows, ad_rows, a, b, with_spend):
+            sp = float(sum(r["spend"] for r in ad_rows)) if with_spend else None
+            ms = money_stats(lead_stats(rows), sp or 0.0)
+            ms["spend"] = sp
+            ms["from"], ms["to"] = a.strftime("%d %b"), b.strftime("%d %b")
+            ms["pending_calls"] = sum((not r["called"]) + (r["bucket"] == "Follow-up") for r in rows)
+            return ms
+        spend_ok = bool(ads)
+        last = period_stats(crm, ads, f, t_, spend_ok)       # the exact rows every other tab uses
+        prev_rows = dedupe([r for r in crm_raw if r["date"] is not None and pf <= r["date"].date() <= pt], [])
+        prev_ads = [r for r in ads_raw if r["day"] is not None and pf <= r["day"].date() <= pt] if spend_ok else []
+        prev = period_stats(prev_rows, prev_ads, pf, pt, spend_ok)
+        prev["partial"] = data_min is not None and pf < data_min
+        selected = {"days": n_days, "from": f.strftime("%d %b %Y"), "to": t_.strftime("%d %b %Y"), "last": last, "prev": prev}
 
     # ---------------- trend
     daily = []
@@ -912,9 +946,17 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     actions = build_actions(acct, campaigns, ads_out, placements, crm, checks, cfg, today)
     growth = growth_plan(acct, campaigns, ads_out, placements, angles, cfg)
 
+    _d = lambda x: x.date() if isinstance(x, dt.datetime) else x  # noqa: E731
+    rng_from = _d(d_from or start)
+    rng_to = _d(d_to or today)
     report = {
         "client": client, "generated_at": dt.datetime.now().strftime("%d %b %Y, %H:%M"),
-        "period": {"from": start.strftime("%d %b %Y"), "to": today.strftime("%d %b %Y")},
+        "period": {"from": rng_from.strftime("%d %b %Y"), "to": rng_to.strftime("%d %b %Y")},
+        "range": {"from": rng_from.isoformat() if hasattr(rng_from, "isoformat") else None,
+                  "to": rng_to.isoformat() if hasattr(rng_to, "isoformat") else None,
+                  "data_min": data_min.isoformat() if data_min else None, "data_max": data_max.isoformat() if data_max else None,
+                  "custom": bool(d_from or d_to)},
+        "selected": selected,
         "files": {k: sorted({n for n, _ in v}) for k, v in src.items()},
         "rules": {"quality_pct": "Quality leads ÷ total leads", "visit_ratio": "(Visited + Booked) ÷ total leads",
                   "quality_stages": [STAGE_LABEL[s] for s in reversed(STAGE_ORDER)], "thresholds": th, "compare_days": N},
@@ -924,11 +966,44 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
         "checks": [{"type": t, "text": x} for t, x in checks],
         "insights": insights,
     }
+    report["reconcile"] = reconcile(report)
+    bad = [x for x in report["reconcile"] if not x["ok"]]
+    if bad:
+        report["checks"].insert(0, {"type": "warn", "text": "Numbers do not match between tabs: " + "; ".join(x["name"] for x in bad)})
     try:
         report["optimisation"] = optimise(report)
     except Exception as e:  # never break the dashboard because of the optimiser
         report["optimisation"] = {"error": f"{type(e).__name__}: {e}"}
     return report
+
+
+# --------------------------------------------------------------------------------------
+# reconciliation — every tab must show the same totals
+# --------------------------------------------------------------------------------------
+def reconcile(r: dict) -> list:
+    acc, camps = r["account"], r["campaigns"]
+    out = []
+
+    def chk(name, a, b, tol=0.0):
+        ok = (a is None and b is None) or (a is not None and b is not None and abs(float(a) - float(b)) <= tol)
+        out.append({"name": name, "a": a, "b": b, "ok": bool(ok)})
+    chk("Lead List rows = total leads", len(r["lists"]["all"]), acc["leads"])
+    chk("Sum of campaign leads = total leads", sum(c["leads"] for c in camps), acc["leads"])
+    chk("Sum of campaign quality = total quality", sum(c["quality"] for c in camps), acc["quality"])
+    chk("Sum of campaign visits = total visits", sum(c["site_visits"] for c in camps), acc["site_visits"])
+    chk("Sum of campaign bookings = total bookings", sum(c["booked"] for c in camps), acc["booked"])
+    chk("Sum of campaign spend = total spend", round(sum(c["spend"] or 0 for c in camps), 2), round(acc.get("spend") or 0, 2), tol=1.0)
+    chk("Quality = Interested + Details/Call back + Will visit + Visited + Booked",
+        acc["interested"] + acc["details_callback"] + acc["will_visit"] + acc["visited"] + acc["booked"], acc["quality"])
+    chk("Quality + Follow-up + Dead + Not called + Unmapped = total leads",
+        acc["quality"] + acc["followup"] + acc["dead"] + acc["not_called"] + acc["unmapped"], acc["leads"])
+    sel = r.get("selected")
+    if sel:
+        last = sel["last"]
+        for k in ("leads", "quality", "site_visits", "booked", "will_visit"):
+            chk(f"Selected-period {k} = account {k}", last[k], acc[k])
+        chk("Selected-period spend = account spend", round(last["spend"] or 0, 2), round(acc.get("spend") or 0, 2), tol=1.0)
+    return out
 
 
 # --------------------------------------------------------------------------------------
