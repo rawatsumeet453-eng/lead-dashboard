@@ -438,6 +438,26 @@ class Classifier:
         """For a Quality lead: dead reason written in the latest status (e.g. Shared Details -> later Not Interested)."""
         return self.dead_reason(norm(latest)) if latest else None
 
+    def classify_final(self, final_s: str, current_s: str = "", followups=None, feedback: str = ""):
+        """CAPI sheets: the lead is judged ONLY from Final Status (written by the CAPI script).
+        Current Status / follow-ups / feedback are not read here (test leads by name / phone are removed by the loader)."""
+        final_n = norm(self.clean(final_s))
+        if final_n and TEST_STATUS_RX.match(final_n):
+            return {"bucket": "Test", "label": "Test lead", "rank": 0, "key": "test", "source": "final"}
+        if final_n and DUPLICATE_RX.search(final_n):
+            return {"bucket": "Duplicate", "label": "Duplicate (marked by sales)", "rank": 0, "key": "duplicate", "source": "final"}
+        if not final_n:
+            return {"bucket": "Not Called", "label": "No Final Status yet", "rank": 0, "key": "not_called", "source": "final_empty"}
+        q = self.best_quality(final_n)
+        if q:
+            return {"bucket": "Quality", "label": q[1], "rank": q[2], "key": q[0], "source": "final"}
+        r = self.dead_reason(final_n)
+        if r:
+            return {"bucket": "Dead", "label": r, "rank": 0, "key": "dead", "source": "final"}
+        if self.is_followup(final_n):
+            return {"bucket": "Follow-up", "label": "Follow-up", "rank": 0, "key": "followup", "source": "final"}
+        return {"bucket": "Unmapped", "label": self.clean(final_s).strip()[:40], "rank": 0, "key": "unmapped", "source": "final"}
+
     def classify(self, final_s: str, current_s: str, followups: list[str], feedback: str):
         """Returns dict(bucket, label, rank, key). Buckets: Quality / Dead / Follow-up / Not Called / Unmapped /
         Duplicate / Test (the last two are removed from totals by the loaders)."""
@@ -453,23 +473,10 @@ class Classifier:
         latest = final_n or current_n or next((x for x in reversed(fu_n) if x), "")
         if latest and DUPLICATE_RX.search(latest) or (not latest and fb_n and DUPLICATE_RX.search(fb_n)):
             return {"bucket": "Duplicate", "label": "Duplicate (marked by sales)", "rank": 0, "key": "duplicate"}
-        # 0) CAPI sheets: Final Status already applies "once quality, always quality" -> trust it
-        if self.source == "auto" and final_n:
-            q = self.best_quality(final_n)
-            if q:
-                return {"bucket": "Quality", "label": q[1], "rank": q[2], "key": q[0], "source": "final"}
-            r = self.dead_reason(final_n)
-            if r:
-                return {"bucket": "Dead", "label": r, "rank": 0, "key": "dead", "source": "final"}
-            if self.is_followup(final_n):
-                return {"bucket": "Follow-up", "label": "Follow-up", "rank": 0, "key": "followup", "source": "final"}
-            # Final Status not understood -> fall back to Current Status + Follow-ups below
         if self.source == "all":
             everything = " | ".join([final_n, current_n, *fu_n, fb_n])
-        elif self.source == "status":
+        else:   # Current Status + Follow-ups (Final Status is handled sheet-level by classify_row)
             everything = " | ".join([current_n, *fu_n])
-        else:
-            everything = " | ".join([final_n, current_n, *fu_n])
 
         # 1) Quality anywhere in status / follow-ups -> Quality forever (best signal wins)
         q = self.best_quality(everything)
@@ -574,7 +581,9 @@ def classify_row(clf: "Classifier", get, cols: dict):
         detailed = next((get(c) for c in cols["extra_status"] if c not in cols["coarse"] and get(c)), "")
         if detailed:
             curr_s, fus = detailed, [curr_s] + [x for x in fus if x != detailed]
-    return clf.classify(final_s, curr_s, fus, fb), fus, fb
+    if cols.get("capi_sheet") and getattr(clf, "source", "auto") == "auto":
+        return clf.classify_final(final_s, curr_s, fus, fb), fus, fb
+    return clf.classify("" if getattr(clf, "source", "auto") != "all" else final_s, curr_s, fus, fb), fus, fb
 
 
 # --------------------------------------------------------------------------------------

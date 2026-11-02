@@ -171,7 +171,10 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
         flag_cols = {stage: find_cols(cols, pats) for stage, pats in CAPI_FLAGS.items()}
         c_plat = find_cols(cols, H_PLATFORM)
         n_test = n_blank = n_sci = n_utc = n_dup = n_wa = n_capi_bad = n_capi_nobasis = 0
-        n_src = {"final": 0, "status": 0}
+        n_src = {"final": 0, "status": 0, "final_empty": 0}
+        # CAPI sheet = has a Final Status column with at least one value -> every lead judged ONLY from Final Status
+        C["capi_sheet"] = bool(C["final"]) and any(_txt(r.get(C["final"])) for r in t.rows)
+        mode_all = getattr(clf, "source", "auto") == "all"
         for r, d, rawd in zip(t.rows, dates, dvals):
             get = lambda c: _txt(r.get(c)) if c else ""  # noqa: E731
             name_, email, phone = get(C["name"]), get(C["email"]), get(C["phone"])
@@ -184,6 +187,8 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
             flags = " ".join(stage for stage, c in flag_cols.items()
                              if c and get(c) and norm(get(c)) not in ("no", "false", "0", "n", "na"))
             res, fus, fb = classify_row(clf, get, C)
+            if not mode_all:      # CAPI tick columns never change the quality (Final Status / status + follow-ups only)
+                flags = ""
             if "booked" in flags:
                 alltxt = " | ".join([get(C["final"]), get(C["current"]), *fus, fb])
                 with_us = re.search(r"booking\s+done\s+with\s+us|booked\s+with\s+us", alltxt, re.I)
@@ -225,7 +230,7 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
                         proof = f"{str(label).strip()}: {val[:70]}"
                         break
             latest = final_s or curr_s or next((x for x in reversed(fus) if x), "")
-            called = bool(final_s or curr_s or any(fus) or fb)
+            called = bool(final_s) if (C["capi_sheet"] and not mode_all) else bool(final_s or curr_s or any(fus) or fb)
             connected = res["bucket"] == "Quality" or (res["bucket"] == "Dead" and res["label"] != "Wrong / Invalid Number")
             doubt = None
             if res["bucket"] == "Quality":
@@ -244,12 +249,14 @@ def load_crm(items, clf: Classifier, checks, cfg=None):
         if C["coarse"] and C["current"] not in C["coarse"]:
             checks.append(("fixed", f"Tab '{tab}': '{str(C['coarse'][0]).strip()}' only holds a bucket (Active / In Active / Not Interested) — "
                                     f"the detailed status column '{str(C['current']).strip()}' is used as the latest status."))
-        src_mode = getattr(clf, "source", "auto")
-        if src_mode == "auto" and C["final"] and n_src["final"]:
-            checks.append(("info", f"Tab '{tab}': CAPI sheet — {n_src['final']} leads judged from '{str(C['final']).strip()}' (Final Status), "
-                                   f"{n_src['status']} without a Final Status judged from Current Status + Follow-ups."))
-        elif src_mode != "all":
-            checks.append(("info", f"Tab '{tab}': no CAPI Final Status — quality judged from Current Status + Follow-ups "
+        if C["capi_sheet"] and not mode_all:
+            checks.append(("info", f"Tab '{tab}': CAPI sheet — every lead judged ONLY from '{str(C['final']).strip()}' (Final Status). "
+                                   "Current Status, follow-ups, feedback and the CAPI tick columns are not used for quality."))
+            if n_src["final_empty"]:
+                checks.append(("warn", f"Tab '{tab}': {n_src['final_empty']} leads have no Final Status yet (CAPI script has not written it) — "
+                                       "counted as 'Not called'. Run the CAPI script / reconcile to fill them."))
+        elif not mode_all:
+            checks.append(("info", f"Tab '{tab}': no CAPI Final Status — quality judged from Current Status + Follow Up columns "
                                    "(Feedback is only used to flag doubtful leads)."))
         if C["notes"]:
             checks.append(("fixed", f"Tab '{tab}': {len(C['notes'])} column(s) without a header contain notes — read as feedback."))
@@ -502,7 +509,7 @@ def fix_for_reasons(dead: dict) -> str:
         "Plan on Hold / Dropped": "ask 'When do you plan to buy?' in the form and nurture 'later' buyers on WhatsApp instead of calling them as hot leads",
         "CP / Broker": "add 'Are you a channel partner?' to the form and exclude broker-heavy audiences",
         "Requirement Mismatch": "state the configuration and carpet area clearly (e.g. '3 BHK, 1,250 sq ft')",
-        "Community Restriction": "mention the community / eligibility rule in the ad so ineligible buyers don't apply",
+        "Community Restriction": "do NOT put the community rule in the ad or form (Meta discrimination policy) — use regional-language creatives, a first-call / WhatsApp pre-qualifier and CAPI Lead_Disqualified",
         "M Client": "ask for budget + timeline in the form to filter low-intent leads",
         "Wrong / Invalid Number": "use Higher Intent form + OTP",
         "Not Enquired / Junk": "use Higher Intent form + OTP",
@@ -734,7 +741,19 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     N = int(cfg.get("compare_days", 7))
     end = today + dt.timedelta(days=1)
 
+    one_month = (start.year, start.month) == (today.year, today.month)
+
     def window_compare(n):
+        if n == 30 and one_month:      # "30 days" inside a one-month report = the full calendar month, same numbers as the report
+            sub = list(crm)
+            wads = list(ads) if (ads and has_days) else []
+            sp = float(sum(r["spend"] for r in wads)) if (ads and has_days) else None
+            ms = money_stats(lead_stats(sub), sp or 0.0)
+            ms["spend"] = sp
+            ms["meta"] = meta_stats(wads) if (ads and has_days) else meta_stats(None)
+            ms["from"], ms["to"] = start.strftime("%d %b"), today.strftime("%d %b")
+            ms["pending_calls"] = sum((not r["called"]) + (r["bucket"] == "Follow-up") for r in sub)
+            return {"last": ms, "prev": {k: None for k in ms} | {"from": "", "to": "", "partial": True}, "full_month": True}
         out = {}
         for wname, (a, b) in {"last": (end - dt.timedelta(days=n), end), "prev": (end - dt.timedelta(days=2 * n), end - dt.timedelta(days=n))}.items():
             sub = [r for r in crm if r["date"] is not None and a <= r["date"] < b]
@@ -772,7 +791,10 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
         prev_ads = [r for r in ads_raw if r["day"] is not None and pf <= r["day"].date() <= pt] if spend_ok else []
         prev = period_stats(prev_rows, prev_ads, pf, pt, spend_ok)
         prev["partial"] = data_min is not None and pf < data_min
-        selected = {"days": n_days, "from": f.strftime("%d %b %Y"), "to": t_.strftime("%d %b %Y"), "last": last, "prev": prev}
+        nxt = (t_ + dt.timedelta(days=1))
+        is_month = f.day == 1 and nxt.day == 1 and (f.year, f.month) == (t_.year, t_.month)   # exactly one calendar month
+        selected = {"days": n_days, "from": f.strftime("%d %b %Y"), "to": t_.strftime("%d %b %Y"), "last": last, "prev": prev,
+                    "is_month": is_month}
 
     # ---------------- trend
     daily = []
@@ -820,7 +842,9 @@ def build_report(src, cfg, client, d_from=None, d_to=None, insights=None, pre_ch
     campaigns.sort(key=lambda x: (-x["quality"], -x["spend"]))
     for key in set(ads_by_ck) - set(by_ck):
         sp = sum(r["spend"] for r in ads_by_ck[key])
-        if sp > 0:
+        if sp > 0 and not sum(r.get("meta_leads") or 0 for r in ads_by_ck[key]):
+            checks.append(("info", f"Meta campaign '{display.get(key, key)}' spent {fmt_inr(sp)} with 0 Meta leads — awareness / traffic campaign (no lead form). It raises account CPL."))
+        elif sp > 0:
             checks.append(("warn", f"Meta campaign '{display.get(key, key)}' spent {fmt_inr(sp)} but has 0 leads in the CRM — name mismatch or leads not reaching the sheet."))
 
     # ---------------- ads + fatigue + angles
@@ -1091,7 +1115,9 @@ def growth_plan(acct, campaigns, ads_out, placements, angles, cfg):
     acpq = acct.get("cost_per_quality")
     camp = []
     for c in campaigns:
-        if c["leads"] == 0 and c["spend"] > 0:
+        if c["leads"] == 0 and c["spend"] > 0 and not (c.get("meta") or {}).get("meta_leads"):
+            move, why = "NO LEAD FORM", f"{fmt_inr(c['spend'])} spent, 0 Meta leads — awareness / traffic campaign. Judge on CPM / CTR, not CPL."
+        elif c["leads"] == 0 and c["spend"] > 0:
             move, why = "CUT", f"{fmt_inr(c['spend'])} spent, 0 leads in CRM."
         elif c["leads"] < low:
             move, why = "TEST — LOW DATA", f"{c['leads']} leads so far (need {low}). Keep a fixed budget until it has data."
@@ -1106,12 +1132,14 @@ def growth_plan(acct, campaigns, ads_out, placements, angles, cfg):
         camp.append({"campaign": c["campaign"], "move": move, "why": why, "leads": c["leads"], "quality": c["quality"],
                      "quality_pct": c["quality_pct"], "visit_ratio_pct": c["visit_ratio_pct"], "spend": c["spend"],
                      "cost_per_quality": c.get("cost_per_quality"), "meets_quality": c["quality_pct"] >= tq, "meets_visit": c["visit_ratio_pct"] >= tv})
-    order = {"SCALE ↑": 0, "HOLD — PUSH VISITS": 1, "OPTIMIZE": 2, "TEST — LOW DATA": 3, "FIX OR CUT ↓": 4, "CUT": 5}
+    order = {"SCALE ↑": 0, "HOLD — PUSH VISITS": 1, "OPTIMIZE": 2, "TEST — LOW DATA": 3, "FIX OR CUT ↓": 4, "CUT": 5, "NO LEAD FORM": 6}
     camp.sort(key=lambda x: (order[x["move"]], -x["quality"]))
-    make_more = [a for a in ads_out if a["quality"] >= 3 and not a["fatigue"]["status"].startswith("Fatigued")]
-    make_more.sort(key=lambda a: (-(a["quality_pct"]), a.get("cost_per_quality") or 1e12))
-    refresh = [a for a in ads_out if a["fatigue"]["status"].startswith("Fatigued")]
     pause = [a for a in ads_out if a["leads"] >= 5 and a["quality_pct"] < th["review_quality_pct"]]
+    paused = {id(a) for a in pause}
+    make_more = [a for a in ads_out if a["quality"] >= 3 and a["quality_pct"] >= th["review_quality_pct"]
+                 and not a["fatigue"]["status"].startswith("Fatigued") and id(a) not in paused]
+    make_more.sort(key=lambda a: (-(a["quality_pct"]), a.get("cost_per_quality") or 1e12))
+    refresh = [a for a in ads_out if a["fatigue"]["status"].startswith("Fatigued") and id(a) not in paused]
     ads_plan = ([{"ad": a["ad"], "campaign": a["campaign"], "move": "MAKE MORE LIKE THIS", "angle": a["angle"], "format": a["format"],
                   "why": f"{a['quality']} quality of {a['leads']} ({a['quality_pct']}%)" + (f", {fmt_inr(a['cost_per_quality'])} per quality lead" if a.get("cost_per_quality") else "")}
                  for a in make_more[:4]]

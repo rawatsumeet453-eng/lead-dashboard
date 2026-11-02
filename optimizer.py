@@ -205,6 +205,9 @@ def optimise(r: dict) -> dict:
         v = _verdict(_n(c.get("strict_quality_pct")), _n(c.get("visit_ratio_pct")), c.get("cost_per_quality"), base_cpq,
                      c["leads"], th, has_spend)
         verdict, rule, owner, action, why = v
+        if c["leads"] == 0 and _n(c.get("spend")) > 0 and not (c.get("meta") or {}).get("meta_leads"):
+            verdict, rule, owner = "NO LEAD FORM", "—", "Media"
+            action, why = "Awareness / traffic campaign — judge on CPM, CTR and reach, not leads.", f"{_inr(c.get('spend'))} spent, 0 Meta leads."
         age = camp_age.get(name)
         if name != NONAME and age is not None and age <= 2:
             verdict, rule, owner = "LEARNING — HOLD", "R14", "Media"

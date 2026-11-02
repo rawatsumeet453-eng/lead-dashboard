@@ -3,6 +3,15 @@
     "name": "Avyukta",
     "config": {}
   },
+  "bafna-horizon": {
+    "name": "Bafna Horizon",
+    "config": {
+      "quality_source": "auto",
+      "columns": {
+        "final_status": "Final CAPI"
+      }
+    }
+  },
   "bafna-pride": {
     "name": "Bafna Pride",
     "config": {}

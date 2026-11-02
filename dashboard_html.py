@@ -19,7 +19,7 @@ PRIORITY_STYLE = {"P1": ("critical", "■"), "P2": ("warn", "◆"), "P3": ("mute
 OPT_STYLE = {"SCALE": ("good", "▲"), "MAKE MORE": ("good", "▲"), "FIX SALES": ("serious", "☎"), "CLEAN FUNNEL": ("warn", "◆"),
              "OPTIMISE": ("warn", "◆"), "FIX ADS + FORM": ("critical", "■"), "FIX TRACKING FIRST": ("critical", "■"), "PAUSE": ("critical", "■"),
              "REFRESH": ("serious", "↻"), "EXCLUDE (test)": ("critical", "▼"), "RE-CHECK": ("warn", "◆"), "LEARNING — HOLD": ("muted", "⏳"),
-             "LOW DATA": ("muted", "○"), "PASS": ("good", "✓"), "FAIL": ("critical", "✗"), "N/A": ("muted", "–")}
+             "LOW DATA": ("muted", "○"), "NO LEAD FORM": ("muted", "○"), "PASS": ("good", "✓"), "FAIL": ("critical", "✗"), "N/A": ("muted", "–")}
 FATIGUE_STYLE = {"Fatigued — refresh": ("critical", "■"), "Watch": ("warn", "◆"), "Healthy": ("good", "▲"), "Not delivering": ("muted", "–")}
 
 
@@ -29,7 +29,8 @@ def pill(text, kind="muted", icon=""):
 
 MOVE_STYLE = {"SCALE ↑": ("good", "▲"), "HOLD — PUSH VISITS": ("warn", "◆"), "OPTIMIZE": ("warn", "◆"), "TEST — LOW DATA": ("muted", "○"),
               "FIX OR CUT ↓": ("critical", "▼"), "CUT": ("critical", "■"), "MAKE MORE LIKE THIS": ("good", "▲"), "REFRESH (fatigued)": ("serious", "↻"),
-              "PAUSE": ("critical", "■"), "KEEP — BEST": ("good", "▲"), "WATCH": ("warn", "◆"), "REMOVE": ("critical", "■")}
+              "PAUSE": ("critical", "■"), "KEEP — BEST": ("good", "▲"), "WATCH": ("warn", "◆"), "REMOVE": ("critical", "■"),
+              "NO LEAD FORM": ("muted", "○")}
 
 
 def move_pill(m):
@@ -249,12 +250,12 @@ def client_html(r):
     acc, th, ins = r["account"], r["rules"]["thresholds"], (r.get("insights") or {})
     sel = r.get("selected")
     last = sel["last"] if sel else account_period(acc)
-    prev = sel["prev"] if sel else None
+    prev = sel["prev"] if sel and not sel.get("is_month") else None     # one calendar month -> no other month shown
     money, visits, strip = period_cards(last, prev, th, client=True)
     has_spend = bool(acc.get("spend"))
     rng = f'{r["period"]["from"]} – {r["period"]["to"]}'
     cmp_line = (f'<span class="cmpnote"> · compared with previous {sel["days"]} days ({E(sel["prev"]["from"])} – {E(sel["prev"]["to"])})</span>'
-                if sel and not sel["prev"].get("partial") else "")
+                if sel and not sel.get("is_month") and not sel["prev"].get("partial") else "")
     camps = [c for c in r["campaigns"] if c["leads"] or (c.get("spend") or 0) > 0]
     c_rows = [[f'<b>{E(c["campaign"] if c["campaign"] != "(no campaign name)" else "Other / not tagged")}</b>', fmt_inr(c["spend"]), num(c["leads"]),
                fmt_inr(c["cpl"]), num(c["quality"]), pc(c["quality_pct"]), fmt_inr(c["cost_per_quality"]), num(c["will_visit"]), num(c["site_visits"]),
@@ -332,14 +333,16 @@ def render(r: dict, start_tab: str = "summary") -> str:
     # ---------------- SUMMARY
     def period_block(n, c, title=None, on=None):
         money, visits, strip = period_cards(c["last"], c["prev"], th)
+        if c.get("full_month") and not title:
+            title = f'📅 Full month ({E(c["last"]["from"])} – {E(c["last"]["to"])}) — same numbers as the rest of the report'
         title = title or (f'📅 Last {n} days ({E(c["last"]["from"])} – {E(c["last"]["to"])}) '
                           f'<span class="cmpnote">vs previous {n} days ({E(c["prev"]["from"])} – {E(c["prev"]["to"])})</span>')
         on = (n == str(N)) if on is None else on
         return (f'<div class="pblock{" on" if on else ""}" data-n="{n}"><h2>{title}</h2>'
-                + ('<p class="tiny cmpnote">Previous period starts before your data — upload a longer date range to see the change %.</p>' if c["prev"].get("partial") else "")
+                + ('<p class="tiny cmpnote">Previous period starts before your data — upload a longer date range to see the change %.</p>' if c["prev"].get("partial") and not c.get("full_month") else "")
                 + f'<div class="kpis">{money}</div><h3>🏠 Visits</h3><div class="kpis">{visits}</div>{strip}</div>')
     sel = r.get("selected")
-    if sel:
+    if sel and not sel.get("is_month"):
         periods_html = period_block(str(sel["days"]), sel, on=True, title=(
             f'📅 Selected period: {E(sel["from"])} – {E(sel["to"])} ({sel["days"]} days) '
             f'<span class="cmpnote">vs previous {sel["days"]} days ({E(sel["prev"]["from"])} – {E(sel["prev"]["to"])})</span>'))
@@ -613,7 +616,9 @@ Totals always match the CRM. Treat it as a <b>strong estimate</b> — for an exa
     nav = "".join(f'<button class="tab{" on" if k == first else ""}" data-t="{k}" onclick="sh(\'{k}\')">{E(t)}</button>' for k, t, _ in tabs)
     panes = "".join(f'<div class="pane{" on" if k == first else ""}" id="p-{k}"><h1 class="ptitle">{E(t)}</h1>{body}</div>' for k, t, body in tabs)
     rg = r.get("range") or {}
-    qbtns = "".join(f'<button class="qb" data-q="{n}" onclick="qn({n})">{n} days</button>' for n in (7, 14, 30, 45, 60))
+    qbtns = "".join(f'<button class="qb" data-q="{n}" onclick="qn({n})">{n} days</button>' for n in (7, 14)) + \
+        '<button class="qb" data-q="month" onclick="qn(\'month\')" title="1st to last day of the month">Full month</button>' + \
+        "".join(f'<button class="qb" data-q="{n}" onclick="qn({n})">{n} days</button>' for n in (45, 60))
     rbar = (f'<div class="rbar noprint"><span class="rl">Period:</span>{qbtns}<button class="qb" data-q="all" onclick="qn(\'all\')">All data</button>'
             f'<span class="rl">From</span><input type="date" id="rf" value="{E(rg.get("from") or "")}" min="{E(rg.get("data_min") or "")}" max="{E(rg.get("data_max") or "")}">'
             f'<span class="rl">To</span><input type="date" id="rt" value="{E(rg.get("to") or "")}" min="{E(rg.get("data_min") or "")}" max="{E(rg.get("data_max") or "")}">'
@@ -642,13 +647,17 @@ function msg(t){{document.getElementById('rmsg').textContent=t;}}
 function go(f,t){{
   if(window.parent&&window.parent!==window){{window.parent.postMessage({{type:'ld-range',from:f,to:t,tab:CUR}},'*');msg('Updating…');}}
   else msg('Period change works on the website (upload the files there).');}}
-function qn(n){{if(n==='all'){{go('','');return;}}if(!RANGE.data_max)return;const t=ymd(RANGE.data_max);go(iso(t-(n-1)*864e5),RANGE.data_max);}}
+function qn(n){{if(n==='all'){{go('','');return;}}if(!RANGE.data_max)return;
+  if(n==='month'){{const m=(RANGE.custom&&RANGE.to?RANGE.to:RANGE.data_max).slice(0,7);const a=m.split('-').map(Number);
+    go(m+'-01',iso(Date.UTC(a[0],a[1],0)));return;}}
+  const t=ymd(RANGE.data_max);go(iso(t-(n-1)*864e5),RANGE.data_max);}}
 function apply(){{const f=document.getElementById('rf').value,t=document.getElementById('rt').value;
   if(f&&t&&f>t){{msg('From date is after To date.');return;}}go(f,t);}}
 function cmpToggle(){{document.body.classList.toggle('nocmp',!document.getElementById('rc').checked);}}
 function clientPdf(){{sh('client');document.body.classList.add('client-print');setTimeout(()=>{{window.print();setTimeout(()=>document.body.classList.remove('client-print'),800);}},150);}}
 (function(){{let on='all';
-  if(RANGE.custom&&RANGE.to===RANGE.data_max&&RANGE.from){{const n=Math.round((ymd(RANGE.to)-ymd(RANGE.from))/864e5)+1;if([7,14,30,45,60].includes(n))on=String(n);else on='';}}
+  if(RANGE.custom&&RANGE.from&&RANGE.from.slice(8)==='01'&&RANGE.to===iso(Date.UTC(+RANGE.from.slice(0,4),+RANGE.from.slice(5,7),0)))on='month';
+  else if(RANGE.custom&&RANGE.to===RANGE.data_max&&RANGE.from){{const n=Math.round((ymd(RANGE.to)-ymd(RANGE.from))/864e5)+1;if([7,14,45,60].includes(n))on=String(n);else on='';}}
   else if(RANGE.custom)on='';
   document.querySelectorAll('.qb[data-q]').forEach(b=>b.classList.toggle('on',b.dataset.q===on));
   if(location.hash==='#clientpdf')setTimeout(clientPdf,400);}})();
